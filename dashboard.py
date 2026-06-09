@@ -8,7 +8,9 @@ Run: streamlit run dashboard.py
 
 import os
 import sqlite3
+import urllib.parse
 
+import feedparser
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -522,6 +524,79 @@ def load_data() -> pd.DataFrame:
 df_all = load_data()
 
 
+# ─── Live News Scraper ─────────────────────────────────────────────────────────
+
+# Maps tickers to company names for better search results
+_TICKER_SEARCH_TERMS = {
+    "AVB":  "AvalonBay Communities REIT",
+    "EQR":  "Equity Residential REIT",
+    "ESS":  "Essex Property Trust REIT",
+    "MAA":  "Mid-America Apartment REIT",
+    "CPT":  "Camden Property Trust REIT",
+    "UDR":  "UDR apartment REIT",
+    "INVH": "Invitation Homes REIT",
+    "AMH":  "American Homes 4 Rent REIT",
+    "CSR":  "Centerspace REIT",
+}
+
+_TOPIC_QUERIES = [
+    ("rent control legislation", []),
+    ("apartment rent cap law", []),
+    ("multifamily REIT regulation", ["AVB", "EQR", "ESS", "MAA", "CPT", "UDR"]),
+    ("algorithmic pricing rent ban", ["AVB", "EQR", "ESS"]),
+    ("single family rental regulation", ["INVH", "AMH"]),
+]
+
+
+@st.cache_data(ttl=300)
+def fetch_live_news() -> pd.DataFrame:
+    """Pull headlines from Google News RSS for tracked tickers and rent-control topics."""
+    rows = []
+    seen_titles = set()
+
+    def _fetch(query: str, tickers: list):
+        url = (
+            "https://news.google.com/rss/search?"
+            + urllib.parse.urlencode({"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"})
+        )
+        try:
+            feed = feedparser.parse(url)
+        except Exception:
+            return
+        for entry in feed.entries[:5]:
+            title = entry.get("title", "").strip()
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            source = entry.get("source", {}).get("title", "Google News")
+            published = entry.get("published", "")[:16]
+            link = entry.get("link", "")
+            summary_raw = entry.get("summary", "")
+            # Strip HTML tags from summary
+            import re
+            summary = re.sub(r"<[^>]+>", " ", summary_raw).strip()[:300]
+            rows.append({
+                "headline": title,
+                "source_name": source,
+                "published": published,
+                "url": link,
+                "tickers_exposed": ",".join(tickers) if tickers else "",
+                "summary": summary,
+            })
+
+    # Per-ticker queries
+    for ticker, term in _TICKER_SEARCH_TERMS.items():
+        _fetch(term, [ticker])
+
+    # Topic queries
+    for query, tickers in _TOPIC_QUERIES:
+        _fetch(query, tickers)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def filter_by_tickers(df: pd.DataFrame, tickers: list) -> pd.DataFrame:
@@ -647,6 +722,7 @@ with st.sidebar:
         "REIT Tickers", ALL_TICKERS, default=ALL_TICKERS,
         help="Filter all views by REIT ticker",
     )
+    st.session_state["_sidebar_tickers"] = selected_tickers or ALL_TICKERS
     all_metros = sorted(df_all["metro_market"].unique().tolist())
     selected_metros = st.multiselect(
         "Metro Market", all_metros, default=all_metros,
@@ -1269,10 +1345,83 @@ with tab4:
     st.markdown(
         "<div class='section-title'>Live Regulatory News Terminal</div>"
         "<div style='color:#7A9BBE;font-size:0.80rem;margin-bottom:18px;'>"
-        "Sorted by most recent · Click 🔍 to open Audit Panel</div>",
+        "Real-time headlines from Google News · Sorted by most recent · Click 🔍 to open Audit Panel</div>",
         unsafe_allow_html=True,
     )
 
+    # ── Live scraped news ──────────────────────────────────────────────────────
+    col_live_hdr, col_live_refresh = st.columns([6, 1])
+    with col_live_hdr:
+        st.markdown(
+            "<div style='display:flex;align-items:center;gap:10px;margin-bottom:12px;'>"
+            "<span style='background:#FF4B4B;color:#fff;font-size:0.68rem;font-weight:800;"
+            "padding:3px 8px;border-radius:4px;letter-spacing:0.08em;'>● LIVE</span>"
+            "<span style='color:#7A9BBE;font-size:0.80rem;'>Google News · refreshes every 5 min</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with col_live_refresh:
+        if st.button("↻ Refresh", key="refresh_live_news"):
+            st.cache_data.clear()
+            st.rerun()
+
+    live_df = fetch_live_news()
+
+    # Filter live news by selected tickers if a specific filter is active
+    selected_tickers = st.session_state.get("_sidebar_tickers", ALL_TICKERS)
+    if live_df.empty:
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.84rem;padding:12px 0 20px 0;'>"
+            "⚠ Could not fetch live news (check your internet connection).</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        # Filter to selected tickers when user has narrowed the filter
+        active_tickers = st.session_state.get("_sidebar_tickers", ALL_TICKERS)
+        if set(active_tickers) != set(ALL_TICKERS):
+            ticker_set = set(active_tickers)
+            live_df = live_df[
+                live_df["tickers_exposed"].apply(
+                    lambda c: bool(ticker_set & set(str(c).split(","))) if c else True
+                )
+            ]
+
+        for _, lrow in live_df.iterrows():
+            ticker_str = str(lrow["tickers_exposed"])
+            chips_html = ticker_chips(ticker_str) if ticker_str else ""
+            source_url = lrow.get("url", "")
+            link_html = (
+                f"<a href='{source_url}' target='_blank' "
+                f"style='color:#C9A84C;font-size:0.75rem;text-decoration:none;margin-left:8px;'>↗ Source</a>"
+                if source_url else ""
+            )
+            st.html(
+                f"<div class='news-card' style='border-left:3px solid #1E90FF;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;'>"
+                f"<span style='color:#C9A84C;font-size:0.72rem;text-transform:uppercase;"
+                f"font-weight:700;letter-spacing:0.07em;'>{lrow['source_name']}</span>"
+                f"<span style='color:#7A9BBE;font-size:0.72rem;'>{lrow['published']}</span>"
+                f"</div>"
+                f"<div style='font-size:0.98rem;font-weight:700;color:#E8EDF5;"
+                f"line-height:1.45;margin-bottom:8px;'>{lrow['headline']}{link_html}</div>"
+                f"<div style='font-size:0.84rem;color:#A8BDD4;line-height:1.6;margin-bottom:10px;'>"
+                f"{lrow['summary']}</div>"
+                f"<div style='display:flex;gap:8px;flex-wrap:wrap;align-items:center;'>"
+                f"<span style='background:#0B1E33;color:#1E90FF;padding:3px 9px;border-radius:20px;"
+                f"font-size:0.72rem;font-weight:700;border:1px solid #1E3A5F;'>LIVE</span>"
+                f"{chips_html}"
+                f"</div>"
+                f"</div>"
+            )
+
+    st.markdown(
+        "<hr style='border-color:#1B3150;margin:24px 0 18px 0;'>"
+        "<div style='color:#7A9BBE;font-size:0.78rem;margin-bottom:14px;'>"
+        "▼ &nbsp;INTELLIGENCE DATABASE — verified entries with audit trails</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── DB intelligence entries ────────────────────────────────────────────────
     if filtered_df.empty:
         st.info("No news items match the current filter.")
     else:
