@@ -910,11 +910,19 @@ FRED_SERIES = {
 
 @st.cache_data(ttl=3600)
 def fetch_fred_series(series_id: str, months: int = 36) -> pd.DataFrame:
-    """Fetch historical FRED data via public CSV endpoint (no API key required)."""
+    """Fetch historical FRED data via public CSV endpoint (no API key required).
+    Source: Federal Reserve Bank of St. Louis (fred.stlouisfed.org)"""
     try:
         url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp = requests.get(url, timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        })
         resp.raise_for_status()
+        # Validate we got CSV, not an error page
+        if not resp.text.strip().startswith("observation_date"):
+            return pd.DataFrame(columns=["date", "value"])
         df = pd.read_csv(io.StringIO(resp.text))
         df.columns = ["date", "value"]
         df["date"] = pd.to_datetime(df["date"])
@@ -1640,6 +1648,16 @@ with cio_tab:
             unsafe_allow_html=True,
         )
         fred_data = fetch_all_fred()
+        fred_available = any(not df.empty for df in fred_data.values())
+        if not fred_available:
+            st.markdown(
+                "<div style='background:#0A1929;border:1px solid #1B3150;border-radius:6px;"
+                "padding:12px;color:#7A9BBE;font-size:0.80rem;'>"
+                "⏳ FRED macro data loading… St. Louis Fed public API · "
+                "<a href='https://fred.stlouisfed.org' target='_blank' "
+                "style='color:#4A90D9;'>fred.stlouisfed.org</a></div>",
+                unsafe_allow_html=True,
+            )
 
         for sid, (label, unit, freq) in FRED_SERIES.items():
             df_fred = fred_data.get(sid, pd.DataFrame())
