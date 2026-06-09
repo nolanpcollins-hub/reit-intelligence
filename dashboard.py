@@ -12,6 +12,7 @@ import urllib.parse
 
 import feedparser
 import pandas as pd
+import requests
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -595,6 +596,212 @@ def fetch_live_news() -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
+
+
+# ─── Prediction Market Feeds ──────────────────────────────────────────────────
+
+_POLY_KEYWORDS = [
+    # Housing / rent control
+    "rent control", "rent cap", "rent stabilization", "housing ballot",
+    "eviction", "tenant", "landlord", "multifamily", "housing", "real estate",
+    "california ballot", "new york rent", "oregon rent", "zoning",
+    # Macro / REIT drivers
+    "federal reserve", "rate cut", "rate hike", "interest rate", "fed funds",
+    "recession", "unemployment", "jobs report", "cpi", "inflation", "gdp",
+    "treasury yield", "mortgage rate", "10-year", "10 year",
+    # Elections affecting housing legislation
+    "senate", "congress", "governor", "california governor",
+]
+
+_MANIFOLD_QUERIES = [
+    ("rent control", "Housing Policy"),
+    ("rent freeze NYC", "Housing Policy"),
+    ("housing ballot", "Housing Policy"),
+    ("zoning reform", "Housing Policy"),
+    ("federal reserve rate cut 2026", "Fed / Rates"),
+    ("federal reserve hike 2026", "Fed / Rates"),
+    ("recession 2026", "Macro"),
+    ("us inflation 2026", "Macro"),
+    ("unemployment 2026", "Macro"),
+    ("real estate crash", "Real Estate"),
+    ("housing market 2026", "Real Estate"),
+]
+
+_PREDICTIT_KEYWORDS = [
+    # Congressional control — directly affects national housing legislation
+    "control the senate", "control the house", "house seats", "senate seats",
+    # State governor races in highest rent-control-risk states
+    "governor of california", "governor of new york", "governor of oregon",
+    "governor of washington", "governor of colorado", "governor of minnesota",
+    "governor of illinois", "governor of massachusetts", "governor of new jersey",
+    # Key Senate races in those states
+    "senate election in california", "senate election in new york",
+    "senate election in oregon", "senate election in washington",
+    "senate election in colorado", "senate election in minnesota",
+    "senate election in illinois", "senate election in massachusetts",
+    # Economy / Fed (PredictIt occasionally has these)
+    "federal reserve", "interest rate", "inflation", "recession",
+]
+
+
+@st.cache_data(ttl=300)
+def fetch_polymarket_odds() -> list[dict]:
+    """Fetch active Polymarket markets relevant to housing/macro/elections."""
+    results = []
+    seen_ids = set()
+    try:
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/markets",
+            params={"active": "true", "closed": "false", "limit": 500},
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        markets = resp.json() if isinstance(resp.json(), list) else resp.json().get("data", [])
+    except Exception:
+        return []
+
+    for m in markets:
+        question = m.get("question", "")
+        if not question:
+            continue
+        q_lower = question.lower()
+        if not any(kw in q_lower for kw in _POLY_KEYWORDS):
+            continue
+        mid = m.get("id", question)
+        if mid in seen_ids:
+            continue
+        seen_ids.add(mid)
+
+        outcomes = m.get("outcomes", "[]")
+        prices   = m.get("outcomePrices", "[]")
+        try:
+            outcomes = outcomes if isinstance(outcomes, list) else __import__("json").loads(outcomes)
+            prices   = prices   if isinstance(prices,   list) else __import__("json").loads(prices)
+        except Exception:
+            outcomes, prices = [], []
+
+        prob = None
+        for oc, pr in zip(outcomes, prices):
+            if str(oc).lower() == "yes":
+                try:
+                    prob = round(float(pr) * 100, 1)
+                except (TypeError, ValueError):
+                    pass
+                break
+        if prob is None and prices:
+            try:
+                prob = round(float(prices[0]) * 100, 1)
+            except (TypeError, ValueError):
+                pass
+
+        end_date = (m.get("endDate") or "")[:10]
+        volume = m.get("volume", 0)
+        try:
+            volume = int(float(volume))
+        except (TypeError, ValueError):
+            volume = 0
+
+        slug = m.get("slug", "")
+        url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+
+        results.append({"question": question, "prob": prob, "end_date": end_date,
+                        "volume": volume, "url": url})
+
+    results.sort(key=lambda x: x["volume"], reverse=True)
+    return results[:20]
+
+
+@st.cache_data(ttl=300)
+def fetch_manifold_odds() -> list[dict]:
+    """Fetch Manifold Markets binary questions relevant to housing/macro."""
+    results = []
+    seen_ids = set()
+    for term, category in _MANIFOLD_QUERIES:
+        try:
+            resp = requests.get(
+                "https://api.manifold.markets/v0/search-markets",
+                params={"term": term, "limit": 4, "filter": "open",
+                        "sort": "liquidity", "contractType": "BINARY"},
+                timeout=8,
+            )
+            markets = resp.json() if resp.ok else []
+        except Exception:
+            continue
+        for m in markets:
+            if m.get("probability") is None:
+                continue
+            mid = m.get("id", m.get("url", ""))
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            try:
+                prob = round(float(m["probability"]) * 100, 1)
+            except (TypeError, ValueError):
+                continue
+            close_ms = m.get("closeTime", 0)
+            try:
+                import datetime
+                end_date = datetime.datetime.fromtimestamp(close_ms / 1000).strftime("%Y-%m-%d")
+            except Exception:
+                end_date = ""
+            results.append({
+                "question": m.get("question", ""),
+                "prob": prob,
+                "end_date": end_date,
+                "volume": int(m.get("volume", 0)),
+                "traders": m.get("uniqueBettorCount", 0),
+                "url": m.get("url", "https://manifold.markets"),
+                "category": category,
+            })
+    results.sort(key=lambda x: x["volume"], reverse=True)
+    seen_q: set = set()
+    deduped = []
+    for r in results:
+        key = r["question"][:60].lower()
+        if key not in seen_q:
+            seen_q.add(key)
+            deduped.append(r)
+    return deduped[:20]
+
+
+@st.cache_data(ttl=300)
+def fetch_predictit_odds() -> list[dict]:
+    """Fetch PredictIt markets relevant to elections in REIT-exposed states + congressional control."""
+    try:
+        resp = requests.get(
+            "https://www.predictit.org/api/marketdata/all/",
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        all_markets = resp.json().get("markets", [])
+    except Exception:
+        return []
+
+    results = []
+    for m in all_markets:
+        name = m.get("name", "")
+        if not any(kw in name.lower() for kw in _PREDICTIT_KEYWORDS):
+            continue
+        contracts = m.get("contracts", [])
+        contract_rows = []
+        for c in contracts:
+            price = c.get("lastTradePrice") or c.get("bestYesPrice")
+            try:
+                prob = round(float(price) * 100, 1) if price is not None else None
+            except (TypeError, ValueError):
+                prob = None
+            contract_rows.append({"name": c.get("name", ""), "prob": prob})
+        contract_rows = [r for r in contract_rows if r["prob"] is not None]
+        if not contract_rows:
+            continue
+        results.append({
+            "question": name,
+            "contracts": contract_rows[:4],
+            "url": m.get("url", "https://www.predictit.org"),
+        })
+    return results[:20]
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1335,6 +1542,157 @@ with tab3:
                 f"<div style='margin-top:6px;'>{ticker_chips(row['tickers_exposed'])}</div>"
                 f"</div></div></div>"
             )
+
+
+    # ── Prediction Markets ─────────────────────────────────────────────────────
+    st.markdown(
+        "<div class='section-title' style='margin-top:28px;'>Prediction Market Intelligence</div>"
+        "<div style='color:#7A9BBE;font-size:0.80rem;margin-bottom:18px;'>"
+        "Live crowd-sourced probability estimates across housing policy, macro, and elections · "
+        "Refreshes every 5 min</div>",
+        unsafe_allow_html=True,
+    )
+
+    def _prob_color(p):
+        if p is None: return "#7A9BBE"
+        return "#FF4B4B" if p >= 60 else ("#FFA500" if p >= 35 else "#21C55D")
+
+    def _prob_bar(p, color):
+        pct = int(p) if p is not None else 0
+        return (
+            f"<div style='background:#1B3150;border-radius:3px;height:5px;margin-top:5px;'>"
+            f"<div style='background:{color};width:{pct}%;height:5px;border-radius:3px;'></div></div>"
+        )
+
+    def _source_header(label, url, note=""):
+        return (
+            f"<div style='display:flex;align-items:center;gap:10px;margin:22px 0 10px;'>"
+            f"<span style='color:#E8EDF5;font-weight:700;font-size:0.95rem;'>{label}</span>"
+            f"<a href='{url}' target='_blank' style='color:#4A90D9;font-size:0.78rem;'>↗ {url.split('//')[1].split('/')[0]}</a>"
+            f"{'<span style=\"color:#7A9BBE;font-size:0.76rem;\">· ' + note + '</span>' if note else ''}"
+            f"</div>"
+        )
+
+    def _market_card(question, prob, end_date, vol_label, url, sub_label="YES implied prob"):
+        color = _prob_color(prob)
+        bar   = _prob_bar(prob, color)
+        prob_display = f"{prob:.1f}%" if prob is not None else "N/A"
+        vol_str = vol_label or "—"
+        end_str = end_date or "—"
+        return (
+            f"<div class='intel-card' style='padding:11px 15px;margin-bottom:7px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:14px;'>"
+            f"<div style='flex:1;'>"
+            f"<a href='{url}' target='_blank' style='color:#C8D8EE;font-size:0.87rem;"
+            f"font-weight:600;text-decoration:none;line-height:1.4;'>{question}</a>"
+            f"{bar}"
+            f"<div style='color:#7A9BBE;font-size:0.74rem;margin-top:4px;'>"
+            f"Closes: {end_str} &nbsp;·&nbsp; {vol_str}</div>"
+            f"</div>"
+            f"<div style='text-align:right;white-space:nowrap;'>"
+            f"<div style='font-size:1.35rem;font-weight:800;color:{color};'>{prob_display}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.70rem;margin-top:1px;'>{sub_label}</div>"
+            f"</div></div></div>"
+        )
+
+    # ── Manifold Markets ───────────────────────────────────────────────────────
+    st.markdown(
+        _source_header("Manifold Markets", "https://manifold.markets",
+                       "community prediction · housing / macro / Fed"),
+        unsafe_allow_html=True,
+    )
+    manifold_data = fetch_manifold_odds()
+    if not manifold_data:
+        st.info("Manifold Markets unreachable or no relevant open markets found.")
+    else:
+        for mkt in manifold_data:
+            traders = mkt.get("traders", 0)
+            vol_label = f"Vol: M${mkt['volume']:,} · {traders} traders"
+            cat_chip = (
+                f"<span style='background:#0F2035;color:#7A9BBE;font-size:0.70rem;"
+                f"padding:1px 6px;border-radius:3px;margin-right:6px;'>{mkt['category']}</span>"
+            )
+            card = _market_card(
+                cat_chip + mkt["question"], mkt["prob"],
+                mkt["end_date"], vol_label, mkt["url"],
+            )
+            st.markdown(card, unsafe_allow_html=True)
+
+    # ── PredictIt ─────────────────────────────────────────────────────────────
+    st.markdown(
+        _source_header("PredictIt", "https://www.predictit.org",
+                       "elections · congressional control · governor races"),
+        unsafe_allow_html=True,
+    )
+    predictit_data = fetch_predictit_odds()
+    if not predictit_data:
+        st.info("PredictIt unreachable or no matching markets found.")
+    else:
+        for mkt in predictit_data:
+            st.markdown(
+                f"<div class='intel-card' style='padding:11px 15px;margin-bottom:7px;'>"
+                f"<a href='{mkt['url']}' target='_blank' style='color:#C8D8EE;font-size:0.87rem;"
+                f"font-weight:600;text-decoration:none;'>{mkt['question']}</a>",
+                unsafe_allow_html=True,
+            )
+            cols = st.columns(min(len(mkt["contracts"]), 4))
+            for col, c in zip(cols, mkt["contracts"]):
+                color = _prob_color(c["prob"])
+                prob_str = f"{c['prob']:.0f}%" if c["prob"] is not None else "—"
+                col.markdown(
+                    f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:6px;"
+                    f"padding:8px 10px;text-align:center;'>"
+                    f"<div style='font-size:1.15rem;font-weight:800;color:{color};'>{prob_str}</div>"
+                    f"<div style='color:#7A9BBE;font-size:0.72rem;margin-top:2px;'>{c['name'][:22]}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Polymarket ────────────────────────────────────────────────────────────
+    st.markdown(
+        _source_header("Polymarket", "https://polymarket.com",
+                       "high-liquidity · housing markets appear when ballot measures gain traction"),
+        unsafe_allow_html=True,
+    )
+    poly_markets = fetch_polymarket_odds()
+    if not poly_markets:
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.83rem;padding:10px 0;'>"
+            "No active Polymarket markets matched housing/macro keywords right now. "
+            "Polymarket covers these when ballot measures gain national traction — "
+            "check back closer to November 2026.</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        for mkt in poly_markets:
+            vol_label = f"Vol: ${mkt['volume']:,}" if mkt["volume"] else "—"
+            st.markdown(
+                _market_card(mkt["question"], mkt["prob"], mkt["end_date"],
+                             vol_label, mkt["url"]),
+                unsafe_allow_html=True,
+            )
+
+    # ── Metaculus link card ────────────────────────────────────────────────────
+    st.markdown(
+        "<div style='margin-top:18px;'></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div class='intel-card' style='padding:12px 16px;'>"
+        "<div style='display:flex;justify-content:space-between;align-items:center;'>"
+        "<div>"
+        "<div style='color:#E8EDF5;font-weight:700;font-size:0.90rem;margin-bottom:4px;'>Metaculus</div>"
+        "<div style='color:#7A9BBE;font-size:0.80rem;'>"
+        "Researcher-grade forecasting with structured resolution criteria · "
+        "Covers housing policy, Fed decisions, and macroeconomic questions · "
+        "Requires free account for API access.</div>"
+        "</div>"
+        "<a href='https://www.metaculus.com/questions/?search=housing' target='_blank' "
+        "style='color:#4A90D9;font-size:0.82rem;white-space:nowrap;margin-left:16px;'>Browse ↗</a>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
