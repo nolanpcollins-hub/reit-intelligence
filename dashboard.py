@@ -541,11 +541,44 @@ _TICKER_SEARCH_TERMS = {
 }
 
 _TOPIC_QUERIES = [
+    # Core national topics
     ("rent control legislation", []),
     ("apartment rent cap law", []),
     ("multifamily REIT regulation", ["AVB", "EQR", "ESS", "MAA", "CPT", "UDR"]),
     ("algorithmic pricing rent ban", ["AVB", "EQR", "ESS"]),
     ("single family rental regulation", ["INVH", "AMH"]),
+    # Macro REIT drivers
+    ("federal reserve interest rate housing", []),
+    ("housing market 2026 outlook", []),
+    ("apartment rent inflation 2026", []),
+    ("commercial real estate market", []),
+    ("multifamily vacancy rates 2026", []),
+    # City-level rent/housing policy
+    ("rent control Atlanta Georgia", []),
+    ("rent control Houston Texas", []),
+    ("rent control Dallas Texas", []),
+    ("rent control Austin Texas", []),
+    ("rent control Denver Colorado", []),
+    ("rent control Chicago Illinois", []),
+    ("rent control Minneapolis Minnesota", []),
+    ("rent control Seattle Washington", []),
+    ("rent control Phoenix Arizona", []),
+    ("rent control Nashville Tennessee", []),
+    ("rent control Charlotte North Carolina", []),
+    ("rent control Miami Florida", []),
+    ("rent control Boston Massachusetts", []),
+    ("NYC rent stabilization 2026", ["EQR", "AVB"]),
+    # State legislative
+    ("California housing bill 2026", ["ESS", "AVB", "EQR"]),
+    ("Oregon rent control legislation", ["ESS"]),
+    ("Minnesota rent control legislation", ["CSR"]),
+    ("Colorado rent control housing", ["UDR", "CPT", "CSR"]),
+    ("Georgia housing regulation Atlanta", ["MAA", "CPT"]),
+    ("Texas housing preemption", ["MAA", "CPT", "INVH", "AMH"]),
+    # Election/political
+    ("mayor election housing policy 2026", []),
+    ("governor election rent control 2026", []),
+    ("senate election housing legislation 2026", []),
 ]
 
 
@@ -603,14 +636,12 @@ def fetch_live_news() -> pd.DataFrame:
 _POLY_KEYWORDS = [
     # Housing / rent control
     "rent control", "rent cap", "rent stabilization", "housing ballot",
-    "eviction", "tenant", "landlord", "multifamily", "housing", "real estate",
-    "california ballot", "new york rent", "oregon rent", "zoning",
+    "eviction moratorium", "multifamily", "real estate crash", "housing market",
+    "new york rent", "oregon rent", "california rent", "zoning ballot",
     # Macro / REIT drivers
     "federal reserve", "rate cut", "rate hike", "interest rate", "fed funds",
-    "recession", "unemployment", "jobs report", "cpi", "inflation", "gdp",
-    "treasury yield", "mortgage rate", "10-year", "10 year",
-    # Elections affecting housing legislation
-    "senate", "congress", "governor", "california governor",
+    "recession", "unemployment rate", "jobs report", "cpi inflation", "gdp growth",
+    "treasury yield", "mortgage rate", "10-year yield",
 ]
 
 _MANIFOLD_QUERIES = [
@@ -802,6 +833,338 @@ def fetch_predictit_odds() -> list[dict]:
             "url": m.get("url", "https://www.predictit.org"),
         })
     return results[:20]
+
+
+# ─── Kalshi Macro Odds ────────────────────────────────────────────────────────
+
+_KALSHI_SERIES = [
+    ("KXFED",    "Fed Funds Rate",       "Will the upper bound of the federal funds rate be above {strike}% following the {meeting} FOMC meeting?"),
+    ("KXCPI",    "CPI Inflation",        None),
+    ("KXGDP",    "GDP Growth",           None),
+    ("KXEHSALES","Existing Home Sales",  None),
+]
+
+_KALSHI_EXTRA_SERIES = ["HOUSESTART", "HOME", "FRMMAX", "CPISHELTER"]
+
+@st.cache_data(ttl=300)
+def fetch_kalshi_odds() -> list[dict]:
+    """Fetch Kalshi macro markets: Fed rate, CPI, GDP, home sales, housing starts."""
+    results = []
+    seen = set()
+    all_series = [s[0] for s in _KALSHI_SERIES] + _KALSHI_EXTRA_SERIES
+    series_labels = {
+        "KXFED": "Fed Funds Rate", "KXCPI": "CPI", "KXGDP": "GDP Growth",
+        "KXEHSALES": "Existing Home Sales", "HOUSESTART": "Housing Starts",
+        "HOME": "New Home Sales", "FRMMAX": "Mortgage Rate High", "CPISHELTER": "CPI Shelter",
+    }
+    for series in all_series:
+        try:
+            resp = requests.get(
+                "https://api.elections.kalshi.com/trade-api/v2/markets",
+                params={"series_ticker": series, "status": "open", "limit": 4},
+                timeout=6,
+                headers={"Accept": "application/json"},
+            )
+            markets = resp.json().get("markets", []) if resp.ok else []
+        except Exception:
+            continue
+        for m in markets:
+            title = m.get("title", "")
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            price = m.get("yes_ask_dollars") or m.get("last_price_dollars")
+            try:
+                prob = round(float(price) * 100, 1) if price is not None else None
+            except (TypeError, ValueError):
+                prob = None
+            close = (m.get("close_time") or "")[:10]
+            results.append({
+                "title": title,
+                "prob": prob,
+                "close": close,
+                "series": series_labels.get(series, series),
+                "ticker": m.get("ticker", ""),
+                "url": f"https://kalshi.com/markets/{m.get('ticker','').lower()}",
+            })
+    results.sort(key=lambda x: (x["series"], x["close"]))
+    return results
+
+
+# ─── Nation View Data ─────────────────────────────────────────────────────────
+
+# Key municipal/state elections in REIT-relevant metros, 2025-2027
+CITY_ELECTION_CALENDAR = {
+    # ── HIGH RENT-CONTROL RISK ──────────────────────────────────────────────────
+    "New York City": {
+        "state": "NY", "risk": "Critical",
+        "tickers": ["EQR", "AVB"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Completed",
+             "note": "Zohran Mamdani (D-primary) won — explicit rent freeze pledge; Brad Lander general election Nov 2025"},
+        ],
+        "rent_control_law": "Active Enforced",
+        "policy_note": "Strongest rent stabilization regime in the US. ~1M stabilized units.",
+    },
+    "Boston": {
+        "state": "MA", "risk": "Critical",
+        "tickers": ["AVB", "EQR"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Completed",
+             "note": "Michelle Wu re-elected; strong rent control advocate"},
+            {"office": "State Senate (MA)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Statewide rent control ballot measure expected 2026"},
+        ],
+        "rent_control_law": "Pending Vote",
+        "policy_note": "Cambridge ballot filed for Nov 2026. Boston pushing state-level enabling legislation.",
+    },
+    "San Francisco": {
+        "state": "CA", "risk": "Critical",
+        "tickers": ["ESS", "AVB"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 5, 2024", "status": "Completed",
+             "note": "Daniel Lurie elected; moderate housing stance"},
+            {"office": "Board of Supervisors (key seats)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Progressive vs. moderate balance determines local rental ordinance enforcement"},
+        ],
+        "rent_control_law": "Active Enforced",
+        "policy_note": "AB 1482 + local just-cause eviction. One of the most regulated US rental markets.",
+    },
+    "Los Angeles": {
+        "state": "CA", "risk": "Critical",
+        "tickers": ["ESS", "AVB", "EQR"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Karen Bass faces re-election; housing policy central to campaign"},
+            {"office": "City Council (key districts)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "RSO enforcement votes depend on council composition"},
+        ],
+        "rent_control_law": "Active Enforced",
+        "policy_note": "LA Rent Stabilization Ordinance + AB 1482. Algorithmic pricing ban active statewide.",
+    },
+    "Minneapolis": {
+        "state": "MN", "risk": "Critical",
+        "tickers": ["CSR"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Upcoming",
+             "note": "Incumbent Jacob Frey facing progressive challengers with rent stabilization platforms"},
+            {"office": "City Council", "date": "Nov 4, 2025", "status": "Upcoming",
+             "note": "Council majority determines rent stabilization ordinance implementation"},
+        ],
+        "rent_control_law": "Developing Ballot",
+        "policy_note": "Minneapolis passed rent stabilization in 2021 but state preemption battles ongoing.",
+    },
+    "Seattle": {
+        "state": "WA", "risk": "Critical",
+        "tickers": ["ESS", "AVB"],
+        "elections": [
+            {"office": "City Council (At-Large)", "date": "Nov 2025", "status": "Upcoming",
+             "note": "Council balance key to rent control ordinance proposals"},
+            {"office": "State Senate (WA)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "WA state rent control bill has advanced; Senate control pivotal"},
+        ],
+        "rent_control_law": "Pending Vote",
+        "policy_note": "Seattle has just-cause eviction. State-level rent cap bill active in 2026 legislature.",
+    },
+    # ── MODERATE RISK ──────────────────────────────────────────────────────────
+    "Denver": {
+        "state": "CO", "risk": "Moderate",
+        "tickers": ["UDR", "CPT", "CSR"],
+        "elections": [
+            {"office": "Mayor", "date": "Jun 2027", "status": "Upcoming",
+             "note": "Mike Johnston (incumbent); pushed state rent stabilization study"},
+            {"office": "State Governor (CO)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Jared Polis term-limited; successor race open — rent control stance TBD"},
+            {"office": "State Legislature (CO)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "CO preemption law expires 2025; legislature could allow local rent control"},
+        ],
+        "rent_control_law": "Developing Ballot",
+        "policy_note": "CO preemption sunset creates acute risk in 2025-2026 window.",
+    },
+    "Chicago": {
+        "state": "IL", "risk": "Moderate",
+        "tickers": ["EQR", "AVB"],
+        "elections": [
+            {"office": "Mayor", "date": "Feb 2027", "status": "Upcoming",
+             "note": "Brandon Johnson up for re-election; strong tenant protection advocate"},
+            {"office": "State Legislature (IL)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "IL preemption under legislative challenge; Chicago pushing for home rule expansion"},
+        ],
+        "rent_control_law": "Pending Vote",
+        "policy_note": "IL preemption technically blocks rent control, but state bills to allow local control have advanced.",
+    },
+    "Portland": {
+        "state": "OR", "risk": "Moderate",
+        "tickers": ["ESS"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 5, 2024", "status": "Completed",
+             "note": "Keith Wilson elected; moderate housing stance"},
+            {"office": "City Council (new structure)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "New 12-member council under ranked-choice; rental policy outcomes uncertain"},
+        ],
+        "rent_control_law": "Active Enforced",
+        "policy_note": "Oregon SB 608: 7% + CPI cap statewide. Portland has additional local eviction controls.",
+    },
+    "Washington DC": {
+        "state": "DC", "risk": "Moderate",
+        "tickers": ["EQR", "AVB", "UDR"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Muriel Bowser term-limited; open race with candidates favoring stronger tenant protections"},
+            {"office": "DC Council", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Council has advanced rent increase limits beyond existing law"},
+        ],
+        "rent_control_law": "Active Enforced",
+        "policy_note": "DC Rent Control Act covers pre-1976 buildings. New tenant protection bills expand coverage.",
+    },
+    # ── LOWER RISK (preemption states — watch for shifts) ─────────────────────
+    "Atlanta": {
+        "state": "GA", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT", "INVH"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Upcoming",
+             "note": "Andre Dickens facing re-election; moderate on housing, supportive of development"},
+            {"office": "City Council", "date": "Nov 2025", "status": "Upcoming",
+             "note": "Watch for tenant protection ordinance proposals from progressive members"},
+            {"office": "State Legislature (GA)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "GA has strong preemption; state races determine whether preemption holds"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "GA state preemption blocks local rent control. Watch for state-level preemption challenge if Dems gain seats.",
+    },
+    "Houston": {
+        "state": "TX", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT", "INVH", "AMH"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 2027", "status": "Upcoming",
+             "note": "John Whitmire (elected 2023); pro-development; TX preemption very strong"},
+            {"office": "State Legislature (TX)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "TX preemption almost certain to hold under Republican supermajority"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "TX state preemption is among the strongest in the US. Very low near-term risk.",
+    },
+    "Dallas": {
+        "state": "TX", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT", "INVH", "AMH"],
+        "elections": [
+            {"office": "Mayor", "date": "Jun 2025", "status": "Upcoming",
+             "note": "Dallas mayoral race; TX preemption insulates from rent control regardless of outcome"},
+            {"office": "City Council", "date": "Jun 2025", "status": "Upcoming",
+             "note": "Council composition less material given state preemption"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "TX preemption. Dallas/Ft Worth is one of the largest multifamily markets in the country.",
+    },
+    "Austin": {
+        "state": "TX", "risk": "Low/Stable",
+        "tickers": ["MAA", "INVH", "AMH"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Kirk Watson (elected 2022); progressive on housing supply but TX preemption binding"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "TX preemption. Austin is one of the fastest-growing multifamily markets; supply-side story.",
+    },
+    "Phoenix": {
+        "state": "AZ", "risk": "Low/Stable",
+        "tickers": ["MAA", "INVH", "AMH", "CPT"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 2026", "status": "Upcoming",
+             "note": "Kate Gallego re-election expected; AZ preemption very strong"},
+            {"office": "State Legislature (AZ)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "AZ Republicans hold preemption firm; watch signature drive (Phoenix ballot measure 142K/237K sigs)"},
+        ],
+        "rent_control_law": "Developing Ballot",
+        "policy_note": "AZ preemption strong but Phoenix ballot initiative has 142K of 237K signatures. Monitor closely.",
+    },
+    "Nashville": {
+        "state": "TN", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT"],
+        "elections": [
+            {"office": "Mayor", "date": "Sep 2027", "status": "Upcoming",
+             "note": "Freddie O'Connell (elected 2023); TN preemption binding"},
+            {"office": "State Legislature (TN)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "TN Republican supermajority; preemption not at risk"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "TN preemption. Nashville is a major Sun Belt multifamily growth market.",
+    },
+    "Charlotte": {
+        "state": "NC", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Upcoming",
+             "note": "Vi Lyles facing re-election; NC preemption binding"},
+            {"office": "State Legislature (NC)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "NC Republicans hold preemption; Dem gains in 2026 could shift landscape long-term"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "NC preemption. Charlotte-Mecklenburg fastest growing metro in the Southeast.",
+    },
+    "Raleigh": {
+        "state": "NC", "risk": "Low/Stable",
+        "tickers": ["MAA", "CPT"],
+        "elections": [
+            {"office": "Mayor", "date": "Nov 4, 2025", "status": "Upcoming",
+             "note": "Mary-Ann Baldwin re-election; NC preemption binding"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "Research Triangle market. Strong job growth driving apartment demand.",
+    },
+    "Tampa": {
+        "state": "FL", "risk": "Low/Stable",
+        "tickers": ["MAA", "INVH", "AMH"],
+        "elections": [
+            {"office": "Mayor", "date": "Mar 2027", "status": "Upcoming",
+             "note": "Jane Castor term-limited; FL preemption among strongest in US"},
+            {"office": "State Legislature (FL)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "FL Republican supermajority; preemption not at risk"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "FL preemption overturned Orange County rent control in 2023. Bulletproof preemption.",
+    },
+    "Las Vegas": {
+        "state": "NV", "risk": "Low/Stable",
+        "tickers": ["INVH", "AMH", "UDR"],
+        "elections": [
+            {"office": "State Legislature (NV)", "date": "Nov 2026", "status": "Upcoming",
+             "note": "NV has no rent control but Democrats hold legislature; watch for new bills"},
+        ],
+        "rent_control_law": "Defeated/Preempted",
+        "policy_note": "NV preempts local rent control but no statewide cap. Watch state Dem majority.",
+    },
+}
+
+# Key 2026 gubernatorial races in high-REIT-exposure states
+GOVERNOR_RACES_2026 = {
+    "CA": {"candidates": "Xavier Becerra (D) vs. Steve Hilton (R)", "risk": "Critical",
+           "note": "CA governor controls AB 1482 enforcement and can sign/veto new rent caps"},
+    "NY": {"candidates": "Kathy Hochul (D, incumbent)", "risk": "Critical",
+           "note": "NY governor critical for Good Cause Eviction expansion and rent law renewal"},
+    "OR": {"candidates": "Open seat — Tina Kotek term-limited 2026", "risk": "Moderate",
+           "note": "OR has statewide rent cap (SB 608); governor influences enforcement"},
+    "WA": {"candidates": "Bob Ferguson (D, incumbent)", "risk": "Moderate",
+           "note": "WA rent control bill advanced in 2026; governor veto or signature is pivotal"},
+    "CO": {"candidates": "Open seat — Polis term-limited", "risk": "Moderate",
+           "note": "CO preemption expires 2025; new governor will set enforcement posture"},
+    "MN": {"candidates": "Tim Walz (D, incumbent)", "risk": "Moderate",
+           "note": "MN rent stabilization battle ongoing; governor's housing agenda matters"},
+    "IL": {"candidates": "JB Pritzker (D, incumbent) up for re-election", "risk": "Moderate",
+           "note": "IL preemption debate; Pritzker has signaled openness to local rent control"},
+    "MA": {"candidates": "Maura Healey (D, incumbent)", "risk": "Moderate",
+           "note": "MA ballot measure likely 2026; governor's stance on state rent control law critical"},
+    "GA": {"candidates": "Brian Kemp term-limited — open race", "risk": "Low/Stable",
+           "note": "GA preemption very strong; new governor unlikely to change"},
+    "TX": {"candidates": "Greg Abbott (R, incumbent)", "risk": "Low/Stable",
+           "note": "TX preemption ironclad under Abbott; no risk of change"},
+    "AZ": {"candidates": "Katie Hobbs (D, incumbent)", "risk": "Low/Stable",
+           "note": "AZ preemption strong; Hobbs has not signaled rent control support"},
+    "FL": {"candidates": "Ron DeSantis term-limited — open race", "risk": "Low/Stable",
+           "note": "FL preemption bulletproof regardless of party"},
+    "NC": {"candidates": "Josh Stein (D, new governor 2025)", "risk": "Low/Stable",
+           "note": "NC preemption; Dem gains in legislature could shift long-term"},
+}
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1003,12 +1366,14 @@ st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🗺️ Regulatory Heatmap",
     "📋 Portfolio Intelligence",
     "🗳️ Election & Ballot Pulse",
     "📰 News Terminal",
     "📊 Market Analysis",
+    "🏙️ Nation View",
+    "🔍 REIT Profiles & Comps",
 ])
 
 
@@ -1694,6 +2059,32 @@ with tab3:
         unsafe_allow_html=True,
     )
 
+    # ── Kalshi ────────────────────────────────────────────────────────────────
+    st.markdown(
+        _source_header("Kalshi", "https://kalshi.com",
+                       "regulated exchange · Fed rate · CPI · GDP · existing home sales"),
+        unsafe_allow_html=True,
+    )
+    kalshi_data = fetch_kalshi_odds()
+    if not kalshi_data:
+        st.info("Kalshi unreachable or no open macro markets found.")
+    else:
+        current_series = None
+        for mkt in kalshi_data:
+            if mkt["series"] != current_series:
+                current_series = mkt["series"]
+                st.markdown(
+                    f"<div style='color:#C9A84C;font-size:0.76rem;font-weight:700;"
+                    f"text-transform:uppercase;letter-spacing:0.06em;margin:14px 0 6px;'>"
+                    f"{current_series}</div>",
+                    unsafe_allow_html=True,
+                )
+            vol_label = f"Closes: {mkt['close']}" if mkt["close"] else ""
+            st.markdown(
+                _market_card(mkt["title"], mkt["prob"], mkt["close"], vol_label, mkt["url"]),
+                unsafe_allow_html=True,
+            )
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — LIVE NEWS TERMINAL
@@ -2038,6 +2429,332 @@ def render_audit_panel(df: pd.DataFrame) -> None:
     if st.sidebar.button("✕ Close Audit Panel", key="clear_audit"):
         del st.session_state["audit_row_id"]
         st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — NATION VIEW
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab6:
+    st.markdown(
+        "<div class='section-title'>Nation View — City & State Election Intelligence</div>"
+        "<div style='color:#7A9BBE;font-size:0.80rem;margin-bottom:18px;'>"
+        "Upcoming elections across all REIT-relevant markets, organized by city. "
+        "Covers mayors, governors, state legislators, and ballot measures that drive rent-control risk.</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Risk legend + filter ───────────────────────────────────────────────────
+    nv_col_filter, nv_col_legend = st.columns([3, 2])
+    with nv_col_filter:
+        nv_risk_filter = st.multiselect(
+            "Filter by Risk Level",
+            ["Critical", "Moderate", "Low/Stable"],
+            default=["Critical", "Moderate", "Low/Stable"],
+            key="nv_risk",
+        )
+    with nv_col_legend:
+        st.markdown(
+            "<div style='display:flex;gap:16px;padding-top:28px;flex-wrap:wrap;'>"
+            "<span style='color:#FF4B4B;font-size:0.80rem;font-weight:700;'>● Critical</span>"
+            "<span style='color:#FFA500;font-size:0.80rem;font-weight:700;'>● Moderate</span>"
+            "<span style='color:#21C55D;font-size:0.80rem;font-weight:700;'>● Low/Stable</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+
+    # ── Governor races 2026 strip ───────────────────────────────────────────────
+    st.markdown(
+        "<div class='section-title'>2026 Gubernatorial Races — State-Level REIT Policy Risk</div>",
+        unsafe_allow_html=True,
+    )
+    gov_risk_filter = [r for r in nv_risk_filter]
+    gov_rows = [(state, info) for state, info in GOVERNOR_RACES_2026.items()
+                if info["risk"] in gov_risk_filter]
+    if gov_rows:
+        for i in range(0, len(gov_rows), 3):
+            chunk = gov_rows[i:i+3]
+            cols = st.columns(len(chunk))
+            for col, (state, info) in zip(cols, chunk):
+                r_color = RISK_COLORS.get(info["risk"], "#7A9BBE")
+                col.markdown(
+                    f"<div class='intel-card' style='padding:12px 14px;height:100%;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;'>"
+                    f"<span style='color:#C9A84C;font-size:1.1rem;font-weight:800;'>{state}</span>"
+                    f"<span style='color:{r_color};font-size:0.72rem;font-weight:700;'>{info['risk']}</span>"
+                    f"</div>"
+                    f"<div style='color:#E8EDF5;font-size:0.80rem;font-weight:600;margin-bottom:6px;'>"
+                    f"{info['candidates']}</div>"
+                    f"<div style='color:#7A9BBE;font-size:0.75rem;line-height:1.5;'>{info['note']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("<div style='margin-top:20px;'></div>", unsafe_allow_html=True)
+
+    # ── City-by-city election calendar ─────────────────────────────────────────
+    st.markdown(
+        "<div class='section-title'>City Election Calendar — Mayor, Council & Local Ballot</div>",
+        unsafe_allow_html=True,
+    )
+
+    filtered_cities = {
+        city: info for city, info in CITY_ELECTION_CALENDAR.items()
+        if info["risk"] in nv_risk_filter
+    }
+    risk_sort = {"Critical": 0, "Moderate": 1, "Low/Stable": 2}
+    sorted_cities = sorted(filtered_cities.items(), key=lambda x: risk_sort.get(x[1]["risk"], 3))
+
+    for city, info in sorted_cities:
+        r_color = RISK_COLORS.get(info["risk"], "#7A9BBE")
+        sol_color = SOL_COLORS.get(info["rent_control_law"], "#7A9BBE")
+
+        with st.expander(
+            f"{city}, {info['state']}  —  {info['risk']}  —  {info['rent_control_law']}",
+            expanded=(info["risk"] == "Critical"),
+        ):
+            hdr_col, tickers_col = st.columns([3, 2])
+            with hdr_col:
+                st.markdown(
+                    f"<div style='color:{r_color};font-size:0.78rem;font-weight:700;margin-bottom:6px;'>"
+                    f"{info['policy_note']}</div>",
+                    unsafe_allow_html=True,
+                )
+            with tickers_col:
+                st.markdown(
+                    "<div style='color:#7A9BBE;font-size:0.73rem;margin-bottom:4px;'>Tickers Exposed</div>"
+                    + ticker_chips(",".join(info["tickers"])),
+                    unsafe_allow_html=True,
+                )
+
+            for election in info["elections"]:
+                status_color = {"Completed": "#21C55D", "Upcoming": "#FFA500"}.get(
+                    election["status"], "#7A9BBE"
+                )
+                st.markdown(
+                    f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:6px;"
+                    f"padding:10px 14px;margin-bottom:8px;'>"
+                    f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;'>"
+                    f"<span style='color:#E8EDF5;font-weight:700;font-size:0.88rem;'>{election['office']}</span>"
+                    f"<div style='display:flex;gap:10px;align-items:center;'>"
+                    f"<span style='color:#7A9BBE;font-size:0.78rem;'>{election['date']}</span>"
+                    f"<span style='color:{status_color};font-size:0.72rem;font-weight:700;'>"
+                    f"{election['status'].upper()}</span>"
+                    f"</div></div>"
+                    f"<div style='color:#C8D8EE;font-size:0.82rem;line-height:1.55;'>{election['note']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Macro calendar (Kalshi) ────────────────────────────────────────────────
+    st.markdown(
+        "<div class='section-title' style='margin-top:28px;'>Macro Event Calendar — Kalshi Market Odds</div>"
+        "<div style='color:#7A9BBE;font-size:0.80rem;margin-bottom:14px;'>"
+        "Fed rate decisions, CPI prints, GDP releases, and home sales data — the macro drivers of REIT valuations.</div>",
+        unsafe_allow_html=True,
+    )
+    kalshi_nation = fetch_kalshi_odds()
+    if not kalshi_nation:
+        st.info("Kalshi unreachable.")
+    else:
+        nv_series = None
+        for mkt in kalshi_nation:
+            if mkt["series"] != nv_series:
+                nv_series = mkt["series"]
+                st.markdown(
+                    f"<div style='color:#C9A84C;font-size:0.78rem;font-weight:700;"
+                    f"text-transform:uppercase;letter-spacing:0.06em;margin:16px 0 6px;'>"
+                    f"{nv_series}</div>",
+                    unsafe_allow_html=True,
+                )
+            color = _prob_color(mkt["prob"])
+            prob_str = f"{mkt['prob']:.1f}%" if mkt["prob"] is not None else "—"
+            st.markdown(
+                f"<div class='intel-card' style='padding:10px 14px;margin-bottom:6px;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                f"<div style='flex:1;'>"
+                f"<a href='{mkt['url']}' target='_blank' style='color:#C8D8EE;font-size:0.85rem;"
+                f"font-weight:600;text-decoration:none;'>{mkt['title']}</a>"
+                f"<div style='color:#7A9BBE;font-size:0.73rem;margin-top:3px;'>Closes: {mkt['close'] or '—'}</div>"
+                f"</div>"
+                f"<div style='color:{color};font-size:1.3rem;font-weight:800;margin-left:16px;white-space:nowrap;'>"
+                f"{prob_str}</div>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — REIT PROFILES & COMPS
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab7:
+    st.markdown(
+        "<div class='section-title'>REIT Profiles & Comparison</div>"
+        "<div style='color:#7A9BBE;font-size:0.80rem;margin-bottom:18px;'>"
+        "Search any tracked ticker to see all exposure, risk items, and prediction market data. "
+        "Select two tickers to compare side-by-side.</div>",
+        unsafe_allow_html=True,
+    )
+
+    rp_mode = st.radio(
+        "Mode", ["Single Ticker Profile", "Side-by-Side Comparison"],
+        horizontal=True, label_visibility="collapsed", key="rp_mode",
+    )
+
+    def _ticker_profile(ticker: str, df: pd.DataFrame, col=None):
+        ctx = col if col else st
+        name = TICKER_NAMES.get(ticker, ticker)
+        rows = df[df["tickers_exposed"].str.contains(ticker, na=False)].copy()
+        rows["_risk_ord"] = rows["portfolio_risk_impact"].map(
+            {"Critical": 0, "Moderate": 1, "Low/Stable": 2}
+        ).fillna(3)
+        rows = rows.sort_values(["_risk_ord", "state_code"])
+
+        critical = int((rows["portfolio_risk_impact"] == "Critical").sum())
+        moderate = int((rows["portfolio_risk_impact"] == "Moderate").sum())
+        stable   = int((rows["portfolio_risk_impact"] == "Low/Stable").sum())
+        avg_sent = rows["sentiment_score"].mean() if not rows.empty else 0.0
+        states   = sorted(rows["state_code"].unique().tolist())
+
+        ctx.markdown(
+            f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:8px;"
+            f"padding:14px 18px;margin-bottom:16px;'>"
+            f"<div style='color:#C9A84C;font-size:1.3rem;font-weight:800;'>{ticker}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.82rem;margin-top:2px;'>{name}</div>"
+            f"<div style='display:flex;gap:20px;margin-top:12px;flex-wrap:wrap;'>"
+            f"<div><div style='color:#FF4B4B;font-size:1.4rem;font-weight:800;'>{critical}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.72rem;'>Critical Items</div></div>"
+            f"<div><div style='color:#FFA500;font-size:1.4rem;font-weight:800;'>{moderate}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.72rem;'>Moderate Items</div></div>"
+            f"<div><div style='color:#21C55D;font-size:1.4rem;font-weight:800;'>{stable}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.72rem;'>Stable Items</div></div>"
+            f"<div><div style='color:{sentiment_color(avg_sent)};font-size:1.4rem;font-weight:800;'>"
+            f"{avg_sent:+.2f}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.72rem;'>Avg Sentiment</div></div>"
+            f"<div><div style='color:#C8D8EE;font-size:1.0rem;font-weight:700;margin-top:4px;'>"
+            f"{', '.join(states) if states else 'N/A'}</div>"
+            f"<div style='color:#7A9BBE;font-size:0.72rem;'>States Tracked</div></div>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Risk breakdown bar
+        total = critical + moderate + stable
+        if total > 0:
+            crit_pct = critical / total * 100
+            mod_pct  = moderate / total * 100
+            stab_pct = stable   / total * 100
+            ctx.markdown(
+                f"<div style='margin-bottom:14px;'>"
+                f"<div style='color:#7A9BBE;font-size:0.72rem;margin-bottom:4px;'>Risk Distribution</div>"
+                f"<div style='display:flex;border-radius:4px;overflow:hidden;height:10px;'>"
+                f"<div style='background:#FF4B4B;width:{crit_pct:.1f}%;'></div>"
+                f"<div style='background:#FFA500;width:{mod_pct:.1f}%;'></div>"
+                f"<div style='background:#21C55D;width:{stab_pct:.1f}%;'></div>"
+                f"</div></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Category breakdown
+        if not rows.empty:
+            cat_counts = rows["category"].value_counts().reset_index()
+            cat_counts.columns = ["Category", "Count"]
+            fig_cat = px.bar(
+                cat_counts, x="Count", y="Category", orientation="h",
+                color="Count", color_continuous_scale=["#1E90FF", "#FF4B4B"],
+                template="plotly_dark",
+            )
+            fig_cat.update_layout(
+                paper_bgcolor="#0C1929", plot_bgcolor="#0C1929",
+                font=dict(color="#D4DCE8", size=11),
+                margin=dict(l=0, r=10, t=10, b=10), height=200,
+                showlegend=False, coloraxis_showscale=False,
+                xaxis=dict(gridcolor="#1B3150"),
+                yaxis=dict(gridcolor="#0C1929", title=""),
+            )
+            ctx.plotly_chart(fig_cat, use_container_width=True)
+
+        # All tracked items
+        ctx.markdown(
+            f"<div style='color:#7A9BBE;font-size:0.73rem;font-weight:700;text-transform:uppercase;"
+            f"letter-spacing:0.05em;margin:10px 0 8px;'>All Tracked Intelligence Items</div>",
+            unsafe_allow_html=True,
+        )
+        for _, row in rows.iterrows():
+            r_color = RISK_COLORS.get(row["portfolio_risk_impact"], "#7A9BBE")
+            ctx.markdown(
+                f"<div class='intel-card' style='padding:10px 14px;margin-bottom:6px;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:12px;'>"
+                f"<div style='flex:1;'>"
+                f"<div style='color:#E8EDF5;font-size:0.86rem;font-weight:600;margin-bottom:4px;'>"
+                f"{row['headline']}</div>"
+                f"<div style='color:#C8D8EE;font-size:0.78rem;line-height:1.5;'>"
+                f"{str(row['summary_insight'])[:280]}…</div>"
+                f"<div style='color:#7A9BBE;font-size:0.72rem;margin-top:4px;'>"
+                f"{row['state_code']} · {row['metro_market']} · {row['category']} · {row['last_updated'][:10]}</div>"
+                f"</div>"
+                f"<div style='text-align:right;white-space:nowrap;'>"
+                f"{risk_badge(row['portfolio_risk_impact'])}<br>"
+                f"{sol_badge(row['state_of_law'])}"
+                f"</div></div></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Prediction markets mentioning this ticker's key states
+        ticker_states = set(rows["state_code"].unique()) if not rows.empty else set()
+        manifold_hits = [
+            m for m in fetch_manifold_odds()
+            if any(st_name.lower() in m["question"].lower()
+                   for st_name in list(ticker_states)[:5])
+               or ticker.lower() in m["question"].lower()
+        ]
+        if manifold_hits:
+            ctx.markdown(
+                "<div style='color:#7A9BBE;font-size:0.73rem;font-weight:700;text-transform:uppercase;"
+                "letter-spacing:0.05em;margin:14px 0 6px;'>Related Prediction Markets (Manifold)</div>",
+                unsafe_allow_html=True,
+            )
+            for mkt in manifold_hits[:4]:
+                ctx.markdown(
+                    _market_card(mkt["question"], mkt["prob"], mkt["end_date"],
+                                 f"Vol M${mkt['volume']:,}", mkt["url"]),
+                    unsafe_allow_html=True,
+                )
+
+    # ── Single profile ─────────────────────────────────────────────────────────
+    if rp_mode == "Single Ticker Profile":
+        selected = st.selectbox(
+            "Select Ticker", ALL_TICKERS,
+            format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
+            key="rp_single",
+        )
+        _ticker_profile(selected, df_all)
+
+    # ── Side-by-side comparison ────────────────────────────────────────────────
+    else:
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            t1 = st.selectbox(
+                "Ticker A", ALL_TICKERS,
+                format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
+                key="rp_comp_a", index=0,
+            )
+        with cc2:
+            t2 = st.selectbox(
+                "Ticker B", ALL_TICKERS,
+                format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
+                key="rp_comp_b", index=1,
+            )
+
+        if t1 == t2:
+            st.warning("Select two different tickers to compare.")
+        else:
+            left, right = st.columns(2)
+            _ticker_profile(t1, df_all, col=left)
+            _ticker_profile(t2, df_all, col=right)
 
 
 render_audit_panel(df_all)
