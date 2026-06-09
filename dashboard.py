@@ -10,9 +10,14 @@ import os
 import sqlite3
 import urllib.parse
 
+import datetime
+import io
+
 import feedparser
 import pandas as pd
 import requests
+import yfinance as yf
+from streamlit_autorefresh import st_autorefresh
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -891,6 +896,95 @@ def fetch_kalshi_odds() -> list[dict]:
     return results
 
 
+# ─── FRED Historical Data ─────────────────────────────────────────────────────
+
+FRED_SERIES = {
+    "FEDFUNDS":        ("Fed Funds Rate",          "%",  "monthly"),
+    "MORTGAGE30US":    ("30-Yr Mortgage Rate",      "%",  "weekly"),
+    "CUSR0000SAH1":    ("CPI Shelter",              "idx","monthly"),
+    "CPIAUCSL":        ("CPI All Items",            "idx","monthly"),
+    "EXHOSLUSM495S":   ("Existing Home Sales",      "M",  "monthly"),
+    "UNRATE":          ("Unemployment Rate",        "%",  "monthly"),
+    "HOUST":           ("Housing Starts",           "K",  "monthly"),
+}
+
+@st.cache_data(ttl=3600)
+def fetch_fred_series(series_id: str, months: int = 36) -> pd.DataFrame:
+    """Fetch historical FRED data via public CSV endpoint (no API key required)."""
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        df.columns = ["date", "value"]
+        df["date"] = pd.to_datetime(df["date"])
+        df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        df = df.dropna().sort_values("date")
+        cutoff = df["date"].max() - pd.DateOffset(months=months)
+        return df[df["date"] >= cutoff].reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame(columns=["date", "value"])
+
+
+@st.cache_data(ttl=3600)
+def fetch_all_fred() -> dict[str, pd.DataFrame]:
+    """Fetch all FRED macro series needed for the CIO dashboard."""
+    return {sid: fetch_fred_series(sid, months=36) for sid in FRED_SERIES}
+
+
+# ─── REIT Market Prices ───────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)
+def fetch_reit_prices(period: str = "1y") -> pd.DataFrame:
+    """Fetch REIT close prices from Yahoo Finance."""
+    try:
+        data = yf.download(ALL_TICKERS, period=period, progress=False,
+                           auto_adjust=True, actions=False)
+        close = data["Close"].dropna(how="all")
+        return close
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def fetch_reit_info() -> dict[str, dict]:
+    """Fetch key market stats for each REIT ticker."""
+    result = {}
+    for ticker in ALL_TICKERS:
+        try:
+            t = yf.Ticker(ticker)
+            fi = t.fast_info
+            result[ticker] = {
+                "last_price":  round(fi.last_price, 2),
+                "year_high":   round(fi.year_high, 2),
+                "year_low":    round(fi.year_low, 2),
+                "market_cap":  fi.market_cap,
+            }
+        except Exception:
+            result[ticker] = {}
+    return result
+
+
+def _sparkline(df: pd.DataFrame, color: str = "#1E90FF", height: int = 80) -> go.Figure:
+    """Return a minimal Plotly sparkline figure."""
+    fig = go.Figure()
+    if not df.empty:
+        fig.add_trace(go.Scatter(
+            x=df["date"], y=df["value"],
+            mode="lines", line=dict(color=color, width=1.5),
+            fill="tozeroy", fillcolor=color.replace(")", ",0.08)").replace("rgb", "rgba"),
+            hovertemplate="%{x|%b %Y}: %{y:.2f}<extra></extra>",
+        ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=4, b=0), height=height,
+        showlegend=False,
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False, autorange=True),
+    )
+    return fig
+
+
 # ─── Nation View Data ─────────────────────────────────────────────────────────
 
 # Key municipal/state elections in REIT-relevant metros, 2025-2027
@@ -1278,6 +1372,49 @@ def get_ai_response(question: str, df: pd.DataFrame) -> str:
         return f"**Error:** {err}"
 
 
+# ─── Prediction-market UI helpers (module-level so all tabs can use them) ────
+
+def _prob_color(p):
+    if p is None: return "#7A9BBE"
+    return "#FF4B4B" if p >= 60 else ("#FFA500" if p >= 35 else "#21C55D")
+
+def _prob_bar(p, color):
+    pct = int(p) if p is not None else 0
+    return (
+        f"<div style='background:#1B3150;border-radius:3px;height:5px;margin-top:5px;'>"
+        f"<div style='background:{color};width:{pct}%;height:5px;border-radius:3px;'></div></div>"
+    )
+
+def _source_header(label, url, note=""):
+    return (
+        f"<div style='display:flex;align-items:center;gap:10px;margin:22px 0 10px;'>"
+        f"<span style='color:#E8EDF5;font-weight:700;font-size:0.95rem;'>{label}</span>"
+        f"<a href='{url}' target='_blank' style='color:#4A90D9;font-size:0.78rem;'>↗ {url.split('//')[1].split('/')[0]}</a>"
+        f"{'<span style=\"color:#7A9BBE;font-size:0.76rem;\">· ' + note + '</span>' if note else ''}"
+        f"</div>"
+    )
+
+def _market_card(question, prob, end_date, vol_label, url, sub_label="YES implied prob"):
+    color = _prob_color(prob)
+    bar   = _prob_bar(prob, color)
+    prob_display = f"{prob:.1f}%" if prob is not None else "N/A"
+    return (
+        f"<div class='intel-card' style='padding:11px 15px;margin-bottom:7px;'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:14px;'>"
+        f"<div style='flex:1;'>"
+        f"<a href='{url}' target='_blank' style='color:#C8D8EE;font-size:0.87rem;"
+        f"font-weight:600;text-decoration:none;line-height:1.4;'>{question}</a>"
+        f"{bar}"
+        f"<div style='color:#7A9BBE;font-size:0.74rem;margin-top:4px;'>"
+        f"Closes: {end_date or '—'} &nbsp;·&nbsp; {vol_label or '—'}</div>"
+        f"</div>"
+        f"<div style='text-align:right;white-space:nowrap;'>"
+        f"<div style='font-size:1.35rem;font-weight:800;color:{color};'>{prob_display}</div>"
+        f"<div style='color:#7A9BBE;font-size:0.70rem;margin-top:1px;'>{sub_label}</div>"
+        f"</div></div></div>"
+    )
+
+
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -1287,6 +1424,22 @@ with st.sidebar:
         "🏢 REIT Intelligence Engine</div>",
         unsafe_allow_html=True,
     )
+
+    _refresh_options = {"Off": 0, "5 min": 300_000, "15 min": 900_000, "30 min": 1_800_000}
+    _refresh_sel = st.selectbox(
+        "Auto-Refresh", list(_refresh_options.keys()), index=1,
+        help="Automatically reload all live data feeds",
+    )
+    _refresh_ms = _refresh_options[_refresh_sel]
+    if _refresh_ms:
+        _tick = st_autorefresh(interval=_refresh_ms, key="global_autorefresh")
+    _last_refresh = datetime.datetime.now().strftime("%H:%M:%S")
+    st.markdown(
+        f"<div style='color:#7A9BBE;font-size:0.72rem;margin-bottom:10px;'>"
+        f"Last refreshed: {_last_refresh}</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
 
     selected_tickers = st.multiselect(
         "REIT Tickers", ALL_TICKERS, default=ALL_TICKERS,
@@ -1366,7 +1519,8 @@ st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+cio_tab, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "⚡ CIO Briefing",
     "🗺️ Regulatory Heatmap",
     "📋 Portfolio Intelligence",
     "🗳️ Election & Ballot Pulse",
@@ -1375,6 +1529,354 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "🏙️ Nation View",
     "🔍 REIT Profiles & Comps",
 ])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CIO BRIEFING TAB — EXECUTIVE MORNING BRIEF
+# ══════════════════════════════════════════════════════════════════════════════
+
+with cio_tab:
+    st.markdown(
+        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+        f"margin-bottom:10px;'>"
+        f"<div style='color:#C9A84C;font-size:1.1rem;font-weight:800;letter-spacing:0.04em;'>"
+        f"CIO MORNING BRIEF</div>"
+        f"<div style='color:#7A9BBE;font-size:0.78rem;'>"
+        f"{datetime.datetime.now().strftime('%A, %B %d %Y')} &nbsp;·&nbsp; "
+        f"Live feeds refreshing every 5 min</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ── KPI strip ─────────────────────────────────────────────────────────────
+    k1, k2, k3, k4, k5 = st.columns(5)
+    crit_n  = int((df_all["portfolio_risk_impact"] == "Critical").sum())
+    active_n = int((df_all["state_of_law"] == "Active Enforced").sum())
+    ballot_n = int(df_all[
+        (df_all["category"] == "Ballot Initiative") &
+        (df_all["state_of_law"].isin(["Developing Ballot", "Pending Vote"]))
+    ].shape[0])
+    avg_sent_all = df_all["sentiment_score"].mean()
+    states_exposed = df_all[
+        df_all["state_of_law"].isin(["Active Enforced", "Pending Vote"])
+    ]["state_code"].nunique()
+
+    k1.metric("Critical Risk Items", crit_n, delta="Immediate attention", delta_color="inverse")
+    k2.metric("Active Enforced Laws", active_n, delta="In effect now", delta_color="off")
+    k3.metric("Active Ballot Measures", ballot_n, delta="Unresolved", delta_color="inverse")
+    k4.metric("Portfolio Sentiment", f"{avg_sent_all:+.2f}",
+              delta="BEARISH" if avg_sent_all < -0.2 else "NEUTRAL", delta_color="off")
+    k5.metric("States w/ Active Risk", states_exposed, delta="of 50 total", delta_color="inverse")
+
+    st.markdown("<div style='margin-top:14px;'></div>", unsafe_allow_html=True)
+
+    # ── Critical alerts + top news ─────────────────────────────────────────────
+    col_alerts, col_macro = st.columns([3, 2])
+
+    with col_alerts:
+        crit_rows = df_all[df_all["portfolio_risk_impact"] == "Critical"].sort_values("last_updated", ascending=False)
+        if crit_rows.empty:
+            st.markdown(
+                "<div style='background:#0A2A0A;border:1px solid #21C55D;border-radius:8px;"
+                "padding:16px;color:#21C55D;font-weight:700;'>✓ No Critical Items Active</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='color:#FF4B4B;font-size:0.78rem;font-weight:700;"
+                "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px;'>"
+                f"⚠ {len(crit_rows)} CRITICAL RISK ITEMS</div>",
+                unsafe_allow_html=True,
+            )
+            for _, row in crit_rows.iterrows():
+                src_link = (f" <a href='{row['source_url']}' target='_blank' "
+                            f"style='color:#C9A84C;font-size:0.72rem;'>↗ Source</a>"
+                            if row.get("source_url") else "")
+                st.markdown(
+                    f"<div style='background:#1A0808;border-left:3px solid #FF4B4B;"
+                    f"border-radius:0 6px 6px 0;padding:10px 14px;margin-bottom:6px;'>"
+                    f"<div style='color:#E8EDF5;font-weight:700;font-size:0.87rem;"
+                    f"margin-bottom:3px;'>{row['headline']}{src_link}</div>"
+                    f"<div style='color:#C8D8EE;font-size:0.78rem;line-height:1.5;'>"
+                    f"{str(row['summary_insight'])[:200]}…</div>"
+                    f"<div style='color:#7A9BBE;font-size:0.70rem;margin-top:4px;'>"
+                    f"{row['state_code']} · {row['metro_market']} · "
+                    f"{row['source_name']} · {row['last_updated'][:10]}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Top news
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.78rem;font-weight:700;"
+            "text-transform:uppercase;letter-spacing:0.06em;margin:16px 0 8px;'>"
+            "Latest News Headlines</div>",
+            unsafe_allow_html=True,
+        )
+        live_news = fetch_live_news()
+        if live_news.empty:
+            st.markdown("<div style='color:#7A9BBE;font-size:0.82rem;'>News unavailable.</div>",
+                        unsafe_allow_html=True)
+        else:
+            for _, nr in live_news.head(6).iterrows():
+                src_link = (f"<a href='{nr['url']}' target='_blank' style='color:#C9A84C;"
+                            f"font-size:0.72rem;margin-left:6px;'>↗</a>" if nr.get("url") else "")
+                st.markdown(
+                    f"<div style='padding:8px 0;border-bottom:1px solid #0F2035;'>"
+                    f"<div style='color:#E8EDF5;font-size:0.84rem;font-weight:600;"
+                    f"line-height:1.4;'>{nr['headline']}{src_link}</div>"
+                    f"<div style='color:#7A9BBE;font-size:0.70rem;margin-top:2px;'>"
+                    f"{nr['source_name']} · {nr['published']}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── Macro snapshot ─────────────────────────────────────────────────────────
+    with col_macro:
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.78rem;font-weight:700;"
+            "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:12px;'>"
+            "Macro Snapshot — Key REIT Drivers</div>",
+            unsafe_allow_html=True,
+        )
+        fred_data = fetch_all_fred()
+
+        for sid, (label, unit, freq) in FRED_SERIES.items():
+            df_fred = fred_data.get(sid, pd.DataFrame())
+            if df_fred.empty:
+                continue
+            latest_val = df_fred["value"].iloc[-1]
+            prev_val   = df_fred["value"].iloc[-2] if len(df_fred) > 1 else latest_val
+            delta      = latest_val - prev_val
+            delta_str  = f"{delta:+.2f}" if unit in ("%",) else f"{delta:+.1f}"
+            val_str    = f"{latest_val:.2f}{unit}" if unit == "%" else f"{latest_val:,.0f}"
+            delta_color = "#FF4B4B" if (delta > 0 and sid in ("FEDFUNDS", "MORTGAGE30US", "CUSR0000SAH1", "CPIAUCSL", "UNRATE")) else "#21C55D" if delta < 0 else "#7A9BBE"
+            latest_date = df_fred["date"].iloc[-1].strftime("%b %Y")
+
+            spark_fig = _sparkline(df_fred, color="#1E90FF" if delta <= 0 else "#FF4B4B")
+
+            st.markdown(
+                f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:6px;"
+                f"padding:10px 12px;margin-bottom:8px;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:flex-start;'>"
+                f"<div>"
+                f"<div style='color:#7A9BBE;font-size:0.70rem;text-transform:uppercase;"
+                f"letter-spacing:0.05em;'>{label}</div>"
+                f"<div style='color:#E8EDF5;font-size:1.2rem;font-weight:800;margin-top:2px;'>"
+                f"{val_str}</div>"
+                f"</div>"
+                f"<div style='text-align:right;'>"
+                f"<div style='color:{delta_color};font-size:0.80rem;font-weight:700;'>{delta_str}</div>"
+                f"<div style='color:#7A9BBE;font-size:0.68rem;'>{latest_date}</div>"
+                f"</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.plotly_chart(spark_fig, use_container_width=True, config={"displayModeBar": False})
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+
+    # ── Prediction market signals ──────────────────────────────────────────────
+    st.markdown(
+        "<div style='color:#7A9BBE;font-size:0.78rem;font-weight:700;"
+        "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px;'>"
+        "Top Prediction Market Signals</div>",
+        unsafe_allow_html=True,
+    )
+    pm_col1, pm_col2, pm_col3 = st.columns(3)
+
+    # Kalshi top signals
+    with pm_col1:
+        st.markdown("<div style='color:#C9A84C;font-size:0.72rem;font-weight:700;margin-bottom:6px;'>KALSHI — Regulated Exchange</div>", unsafe_allow_html=True)
+        kalshi_cio = fetch_kalshi_odds()
+        for m in kalshi_cio[:4]:
+            color = _prob_color(m["prob"])
+            prob_str = f"{m['prob']:.0f}%" if m["prob"] is not None else "—"
+            st.markdown(
+                f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:5px;"
+                f"padding:8px 10px;margin-bottom:5px;display:flex;justify-content:space-between;'>"
+                f"<div style='color:#C8D8EE;font-size:0.76rem;line-height:1.4;flex:1;'>"
+                f"<a href='{m['url']}' target='_blank' style='color:#C8D8EE;text-decoration:none;'>"
+                f"{m['title'][:65]}</a></div>"
+                f"<div style='color:{color};font-size:0.95rem;font-weight:800;margin-left:8px;white-space:nowrap;'>"
+                f"{prob_str}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # Manifold top signals
+    with pm_col2:
+        st.markdown("<div style='color:#4A90D9;font-size:0.72rem;font-weight:700;margin-bottom:6px;'>MANIFOLD — Housing & Macro</div>", unsafe_allow_html=True)
+        mf_cio = fetch_manifold_odds()
+        for m in mf_cio[:4]:
+            color = _prob_color(m["prob"])
+            prob_str = f"{m['prob']:.0f}%" if m["prob"] is not None else "—"
+            st.markdown(
+                f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:5px;"
+                f"padding:8px 10px;margin-bottom:5px;display:flex;justify-content:space-between;'>"
+                f"<div style='color:#C8D8EE;font-size:0.76rem;line-height:1.4;flex:1;'>"
+                f"<a href='{m['url']}' target='_blank' style='color:#C8D8EE;text-decoration:none;'>"
+                f"{m['question'][:65]}</a></div>"
+                f"<div style='color:{color};font-size:0.95rem;font-weight:800;margin-left:8px;white-space:nowrap;'>"
+                f"{prob_str}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+    # PredictIt top signals
+    with pm_col3:
+        st.markdown("<div style='color:#21C55D;font-size:0.72rem;font-weight:700;margin-bottom:6px;'>PREDICTIT — Elections</div>", unsafe_allow_html=True)
+        pi_cio = fetch_predictit_odds()
+        shown = 0
+        for m in pi_cio:
+            if shown >= 4:
+                break
+            top_c = m["contracts"][0] if m["contracts"] else None
+            if not top_c:
+                continue
+            color = _prob_color(top_c["prob"])
+            prob_str = f"{top_c['prob']:.0f}%" if top_c["prob"] is not None else "—"
+            st.markdown(
+                f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:5px;"
+                f"padding:8px 10px;margin-bottom:5px;display:flex;justify-content:space-between;'>"
+                f"<div style='color:#C8D8EE;font-size:0.76rem;line-height:1.4;flex:1;'>"
+                f"<a href='{m['url']}' target='_blank' style='color:#C8D8EE;text-decoration:none;'>"
+                f"{m['question'][:55]} [{top_c['name'][:15]}]</a></div>"
+                f"<div style='color:{color};font-size:0.95rem;font-weight:800;margin-left:8px;white-space:nowrap;'>"
+                f"{prob_str}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            shown += 1
+
+    # ── Upcoming events ────────────────────────────────────────────────────────
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+    ev_col, pi_col = st.columns([3, 2])
+
+    with ev_col:
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.78rem;font-weight:700;"
+            "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px;'>"
+            "Upcoming Events — Next 90 Days</div>",
+            unsafe_allow_html=True,
+        )
+        today = datetime.date.today()
+        cutoff = today + datetime.timedelta(days=90)
+        _months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+        events_upcoming = []
+        for city, info in CITY_ELECTION_CALENDAR.items():
+            for el in info["elections"]:
+                if el["status"] == "Upcoming":
+                    date_str = el["date"]
+                    try:
+                        dt = datetime.datetime.strptime(date_str, "%b %d, %Y").date()
+                        if today <= dt <= cutoff:
+                            events_upcoming.append({
+                                "date": dt, "label": f"{el['office']} — {city}, {info['state']}",
+                                "note": el["note"], "risk": info["risk"],
+                                "tickers": info["tickers"],
+                            })
+                    except ValueError:
+                        pass
+        for s, bs in BALLOT_SUPPLEMENTS.items():
+            dl = bs.get("deadline", "") or bs.get("election_date", "")
+            nm = bs.get("next_milestone", "")
+            for text in [dl, nm]:
+                if not text or len(text) < 6:
+                    continue
+                for fmt in ["%B %d, %Y", "%B %Y", "%b %Y"]:
+                    try:
+                        dt = datetime.datetime.strptime(text.split("—")[0].strip()[:20], fmt).date()
+                        if today <= dt <= cutoff:
+                            events_upcoming.append({
+                                "date": dt, "label": f"Ballot: {s}",
+                                "note": text, "risk": "Critical", "tickers": [],
+                            })
+                        break
+                    except ValueError:
+                        continue
+
+        events_upcoming.sort(key=lambda x: x["date"])
+        if not events_upcoming:
+            st.markdown("<div style='color:#7A9BBE;font-size:0.82rem;'>No elections or ballot deadlines found in the next 90 days.</div>", unsafe_allow_html=True)
+        else:
+            for ev in events_upcoming[:12]:
+                r_color = RISK_COLORS.get(ev["risk"], "#7A9BBE")
+                days_out = (ev["date"] - today).days
+                urgency = "#FF4B4B" if days_out <= 14 else ("#FFA500" if days_out <= 45 else "#7A9BBE")
+                chips = ticker_chips(",".join(ev["tickers"])) if ev["tickers"] else ""
+                st.markdown(
+                    f"<div style='display:flex;gap:10px;align-items:flex-start;padding:7px 0;"
+                    f"border-bottom:1px solid #0F2035;'>"
+                    f"<div style='min-width:72px;text-align:center;background:#0A1929;"
+                    f"border-radius:5px;padding:4px 6px;'>"
+                    f"<div style='color:{urgency};font-size:0.85rem;font-weight:800;'>{ev['date'].strftime('%b %d')}</div>"
+                    f"<div style='color:#7A9BBE;font-size:0.65rem;'>{days_out}d away</div>"
+                    f"</div>"
+                    f"<div style='flex:1;'>"
+                    f"<div style='color:#E8EDF5;font-size:0.83rem;font-weight:600;'>{ev['label']}</div>"
+                    f"<div style='color:#C8D8EE;font-size:0.76rem;line-height:1.4;'>{ev['note'][:120]}</div>"
+                    f"{chips}"
+                    f"</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    with pi_col:
+        # REIT price performance table
+        st.markdown(
+            "<div style='color:#7A9BBE;font-size:0.78rem;font-weight:700;"
+            "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px;'>"
+            "REIT Price Performance</div>",
+            unsafe_allow_html=True,
+        )
+        reit_info = fetch_reit_info()
+        reit_prices = fetch_reit_prices()
+
+        for ticker in ALL_TICKERS:
+            info = reit_info.get(ticker, {})
+            if not info:
+                continue
+            price = info.get("last_price", 0)
+            yh = info.get("year_high", price)
+            yl = info.get("year_low", price)
+            pct_from_high = (price - yh) / yh * 100 if yh else 0
+            # 1-month return
+            m1_return = None
+            if not reit_prices.empty and ticker in reit_prices.columns:
+                col_data = reit_prices[ticker].dropna()
+                if len(col_data) >= 21:
+                    m1_return = (col_data.iloc[-1] / col_data.iloc[-22] - 1) * 100
+            ret_str = f"{m1_return:+.1f}%" if m1_return is not None else "—"
+            ret_color = "#21C55D" if (m1_return or 0) >= 0 else "#FF4B4B"
+            high_pct_color = "#FF4B4B" if pct_from_high < -15 else ("#FFA500" if pct_from_high < -7 else "#21C55D")
+
+            st.markdown(
+                f"<div style='background:#0A1929;border:1px solid #1B3150;border-radius:5px;"
+                f"padding:7px 10px;margin-bottom:5px;'>"
+                f"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+                f"<div>"
+                f"<span style='color:#C9A84C;font-weight:800;font-size:0.88rem;'>{ticker}</span>"
+                f"<span style='color:#7A9BBE;font-size:0.70rem;margin-left:5px;'>${price:.2f}</span>"
+                f"</div>"
+                f"<div style='display:flex;gap:10px;align-items:center;'>"
+                f"<span style='color:{ret_color};font-size:0.80rem;font-weight:700;'>1M {ret_str}</span>"
+                f"<span style='color:{high_pct_color};font-size:0.72rem;'>{pct_from_high:.1f}% vs 52W H</span>"
+                f"</div>"
+                f"</div>"
+                f"<div style='background:#1B3150;border-radius:2px;height:3px;margin-top:5px;'>"
+                f"<div style='background:#C9A84C;height:3px;border-radius:2px;"
+                f"width:{max(0, (price - yl) / (yh - yl) * 100) if yh != yl else 50:.0f}%;'></div>"
+                f"</div>"
+                f"<div style='display:flex;justify-content:space-between;'>"
+                f"<span style='color:#7A9BBE;font-size:0.62rem;'>${yl:.0f} 52W L</span>"
+                f"<span style='color:#7A9BBE;font-size:0.62rem;'>${yh:.0f} 52W H</span>"
+                f"</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1917,48 +2419,6 @@ with tab3:
         "Refreshes every 5 min</div>",
         unsafe_allow_html=True,
     )
-
-    def _prob_color(p):
-        if p is None: return "#7A9BBE"
-        return "#FF4B4B" if p >= 60 else ("#FFA500" if p >= 35 else "#21C55D")
-
-    def _prob_bar(p, color):
-        pct = int(p) if p is not None else 0
-        return (
-            f"<div style='background:#1B3150;border-radius:3px;height:5px;margin-top:5px;'>"
-            f"<div style='background:{color};width:{pct}%;height:5px;border-radius:3px;'></div></div>"
-        )
-
-    def _source_header(label, url, note=""):
-        return (
-            f"<div style='display:flex;align-items:center;gap:10px;margin:22px 0 10px;'>"
-            f"<span style='color:#E8EDF5;font-weight:700;font-size:0.95rem;'>{label}</span>"
-            f"<a href='{url}' target='_blank' style='color:#4A90D9;font-size:0.78rem;'>↗ {url.split('//')[1].split('/')[0]}</a>"
-            f"{'<span style=\"color:#7A9BBE;font-size:0.76rem;\">· ' + note + '</span>' if note else ''}"
-            f"</div>"
-        )
-
-    def _market_card(question, prob, end_date, vol_label, url, sub_label="YES implied prob"):
-        color = _prob_color(prob)
-        bar   = _prob_bar(prob, color)
-        prob_display = f"{prob:.1f}%" if prob is not None else "N/A"
-        vol_str = vol_label or "—"
-        end_str = end_date or "—"
-        return (
-            f"<div class='intel-card' style='padding:11px 15px;margin-bottom:7px;'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:flex-start;gap:14px;'>"
-            f"<div style='flex:1;'>"
-            f"<a href='{url}' target='_blank' style='color:#C8D8EE;font-size:0.87rem;"
-            f"font-weight:600;text-decoration:none;line-height:1.4;'>{question}</a>"
-            f"{bar}"
-            f"<div style='color:#7A9BBE;font-size:0.74rem;margin-top:4px;'>"
-            f"Closes: {end_str} &nbsp;·&nbsp; {vol_str}</div>"
-            f"</div>"
-            f"<div style='text-align:right;white-space:nowrap;'>"
-            f"<div style='font-size:1.35rem;font-weight:800;color:{color};'>{prob_display}</div>"
-            f"<div style='color:#7A9BBE;font-size:0.70rem;margin-top:1px;'>{sub_label}</div>"
-            f"</div></div></div>"
-        )
 
     # ── Manifold Markets ───────────────────────────────────────────────────────
     st.markdown(
@@ -2676,6 +3136,41 @@ with tab7:
                 yaxis=dict(gridcolor="#0C1929", title=""),
             )
             ctx.plotly_chart(fig_cat, use_container_width=True)
+
+        # 1-Year price chart
+        prices_df = fetch_reit_prices()
+        if not prices_df.empty and ticker in prices_df.columns:
+            price_series = prices_df[ticker].dropna().reset_index()
+            price_series.columns = ["date", "value"]
+            info_d = fetch_reit_info().get(ticker, {})
+            current_p = info_d.get("last_price")
+            start_p   = price_series["value"].iloc[0] if not price_series.empty else None
+            ytd_ret   = (current_p / start_p - 1) * 100 if current_p and start_p else None
+            line_color = "#21C55D" if (ytd_ret or 0) >= 0 else "#FF4B4B"
+
+            fig_price = go.Figure()
+            fig_price.add_trace(go.Scatter(
+                x=price_series["date"], y=price_series["value"],
+                mode="lines", line=dict(color=line_color, width=2),
+                fill="tozeroy",
+                fillcolor=line_color.replace("#", "rgba(").replace("FF4B4B","255,75,75,0.08)").replace("21C55D","33,197,93,0.08)"),
+                hovertemplate="%{x|%b %d %Y}: $%{y:.2f}<extra></extra>",
+                name=ticker,
+            ))
+            ret_label = f"{ytd_ret:+.1f}% (1Y)" if ytd_ret is not None else ""
+            fig_price.update_layout(
+                paper_bgcolor="#0C1929", plot_bgcolor="#0C1929",
+                font=dict(color="#D4DCE8", size=11),
+                margin=dict(l=10, r=10, t=26, b=10), height=180,
+                showlegend=False,
+                title=dict(text=f"{ticker} — 1 Year Price  {ret_label}",
+                           font=dict(color="#7A9BBE", size=11), x=0),
+                xaxis=dict(gridcolor="#1B3150", tickfont=dict(color="#7A9BBE", size=10)),
+                yaxis=dict(gridcolor="#1B3150", tickfont=dict(color="#7A9BBE", size=10),
+                           tickprefix="$"),
+            )
+            ctx.plotly_chart(fig_price, use_container_width=True,
+                             config={"displayModeBar": False})
 
         # All tracked items
         ctx.markdown(
