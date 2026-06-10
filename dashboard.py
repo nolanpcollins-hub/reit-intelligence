@@ -1,8 +1,8 @@
 """
 dashboard.py
-US Multifamily REIT & Rent Control Intelligence Engine
+US REIT Intelligence Engine — Full Universe Coverage
 Executive-grade platform for Fund Supervisor, PM, and CIO.
-Tracks: AVB · EQR · ESS · MAA · CPT · UDR · INVH · AMH · CSR
+Covers 130+ REITs across 13 sectors.
 Run: streamlit run dashboard.py
 """
 
@@ -27,18 +27,153 @@ import streamlit.components.v1 as components
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_intelligence.db")
 
-ALL_TICKERS = ["AVB", "EQR", "ESS", "MAA", "CPT", "UDR", "INVH", "AMH", "CSR"]
+REIT_SECTORS: dict[str, list[str]] = {
+    "Apartment":        ["AVB", "EQR", "ESS", "UDR", "MAA", "CPT", "IRT", "CSR", "NXRT", "BRT"],
+    "Alt Housing":      ["INVH", "AMH", "MRP", "SUI", "ELS", "UMH"],
+    "Industrial":       ["PLD", "EGP", "REXR", "FR", "TRNO", "STAG", "LXP", "ILPT", "COLD", "LINE"],
+    "Healthcare":       ["WELL", "VTR", "AHR", "DHC", "JAN", "OHI", "CTRE", "SBRA", "NHI", "LTC",
+                         "DOC", "ARE", "HR", "MPT", "SILA", "UHT", "CHCT", "XRN"],
+    "Specialty":        ["LAMR", "OUT", "AMT", "CCI", "SBAC", "IIPR", "FPI"],
+    "Data Centers":     ["EQIX", "DLR", "IRM"],
+    "Shopping Centers": ["KIM", "FRT", "BRX", "KRG", "UE", "CTO", "REG", "PECO", "IVT",
+                         "AKR", "CURB", "WSR", "BFS", "SITC"],
+    "Mall":             ["SPG", "MAC", "SKT", "CBL"],
+    "Self Storage":     ["PSA", "EXR", "CUBE", "NSA", "SMA"],
+    "Hotel":            ["HST", "RHP", "PK", "DRH", "SHO", "PEB", "XHR", "APLE", "RLJ", "SVC", "CLDT", "BHR"],
+    "Office":           ["BXP", "JBGS", "VNO", "SLG", "ESRT", "CUZ", "HIW", "PDM", "KRC", "DEI",
+                         "AAT", "HPP", "CDP", "DEA", "BDN"],
+    "Diversified":      ["GOOD", "ALX", "AHRT", "LAND", "NXDT", "PKST"],
+    "Timber":           ["RYN", "WY"],
+}
 
-TICKER_NAMES = {
+ALL_TICKERS: list[str] = [t for tickers in REIT_SECTORS.values() for t in tickers]
+
+TICKER_NAMES: dict[str, str] = {
+    # Apartment
     "AVB":  "AvalonBay Communities",
     "EQR":  "Equity Residential",
     "ESS":  "Essex Property Trust",
+    "UDR":  "UDR Inc.",
     "MAA":  "Mid-America Apartment",
     "CPT":  "Camden Property Trust",
-    "UDR":  "UDR Inc.",
+    "IRT":  "Independence Realty Trust",
+    "CSR":  "Centerspace",
+    "NXRT": "NexPoint Residential Trust",
+    "BRT":  "BRT Realty Trust",
+    # Alt Housing
     "INVH": "Invitation Homes",
     "AMH":  "American Homes 4 Rent",
-    "CSR":  "Centerspace",
+    "MRP":  "Millrose Properties",
+    "SUI":  "Sun Communities",
+    "ELS":  "Equity LifeStyle Properties",
+    "UMH":  "UMH Properties",
+    # Industrial
+    "PLD":  "Prologis",
+    "EGP":  "EastGroup Properties",
+    "REXR": "Rexford Industrial Realty",
+    "FR":   "First Industrial Realty Trust",
+    "TRNO": "Terreno Realty",
+    "STAG": "STAG Industrial",
+    "LXP":  "LXP Industrial Trust",
+    "ILPT": "Industrial Logistics Properties Trust",
+    "COLD": "Americold Realty Trust",
+    "LINE": "Lineage",
+    # Healthcare
+    "WELL": "Welltower",
+    "VTR":  "Ventas",
+    "AHR":  "American Healthcare REIT",
+    "DHC":  "Diversified Healthcare Trust",
+    "JAN":  "Janus Living",
+    "OHI":  "Omega Healthcare Investors",
+    "CTRE": "CareTrust REIT",
+    "SBRA": "Sabra Health Care REIT",
+    "NHI":  "National Health Investors",
+    "LTC":  "LTC Properties",
+    "DOC":  "Healthpeak Properties",
+    "ARE":  "Alexandria Real Estate Equities",
+    "HR":   "Healthcare Realty Trust",
+    "MPT":  "Medical Properties Trust",
+    "SILA": "Sila Realty Trust",
+    "UHT":  "Universal Health Realty Income Trust",
+    "CHCT": "Community Healthcare Trust",
+    "XRN":  "Chiron Real Estate",
+    # Specialty
+    "LAMR": "Lamar Advertising",
+    "OUT":  "Outfront Media",
+    "AMT":  "American Tower",
+    "CCI":  "Crown Castle",
+    "SBAC": "SBA Communications",
+    "IIPR": "Innovative Industrial Properties",
+    "FPI":  "Forum Pacific",
+    # Data Centers
+    "EQIX": "Equinix",
+    "DLR":  "Digital Realty Trust",
+    "IRM":  "Iron Mountain",
+    # Shopping Centers
+    "KIM":  "Kimco Realty",
+    "FRT":  "Federal Realty Investment Trust",
+    "BRX":  "Brixmor Property Group",
+    "KRG":  "Kite Realty Group Trust",
+    "UE":   "Urban Edge Properties",
+    "CTO":  "CTO Realty Growth",
+    "REG":  "Regency Centers",
+    "PECO": "Phillips Edison & Company",
+    "IVT":  "InvenTrust Properties",
+    "AKR":  "Acadia Realty Trust",
+    "CURB": "Curbline Properties",
+    "WSR":  "Whitestone REIT",
+    "BFS":  "Saul Centers",
+    "SITC": "SITE Centers",
+    # Mall
+    "SPG":  "Simon Property Group",
+    "MAC":  "Macerich",
+    "SKT":  "Tanger",
+    "CBL":  "CBL & Associates Properties",
+    # Self Storage
+    "PSA":  "Public Storage",
+    "EXR":  "Extra Space Storage",
+    "CUBE": "CubeSmart",
+    "NSA":  "National Storage Affiliates",
+    "SMA":  "SmartStop Self Storage REIT",
+    # Hotel
+    "HST":  "Host Hotels & Resorts",
+    "RHP":  "Ryman Hospitality Properties",
+    "PK":   "Park Hotels & Resorts",
+    "DRH":  "DiamondRock Hospitality",
+    "SHO":  "Sportshero",
+    "PEB":  "Pebblebrook Hotel Trust",
+    "XHR":  "Xenia Hotels & Resorts",
+    "APLE": "Apple Hospitality REIT",
+    "RLJ":  "RLJ Lodging Trust",
+    "SVC":  "Service Properties Trust",
+    "CLDT": "Chatham Lodging Trust",
+    "BHR":  "Braemar Hotels & Resorts",
+    # Office
+    "BXP":  "BXP Inc.",
+    "JBGS": "JBG SMITH Properties",
+    "VNO":  "Vornado Realty Trust",
+    "SLG":  "SL Green Realty",
+    "ESRT": "Empire State Realty Trust",
+    "CUZ":  "Cousins Properties",
+    "HIW":  "Highwoods Properties",
+    "PDM":  "Piedmont Realty Trust",
+    "KRC":  "Kilroy Realty",
+    "DEI":  "Douglas Emmett",
+    "AAT":  "AATech SpA SB",
+    "HPP":  "Hudson Pacific Properties",
+    "CDP":  "COPT Defense Properties",
+    "DEA":  "Easterly Government Properties",
+    "BDN":  "Brandywine Realty Trust",
+    # Diversified
+    "GOOD": "Gladstone Commercial",
+    "ALX":  "Alexander's",
+    "AHRT": "AH Realty Trust",
+    "LAND": "Land Securities Group",
+    "NXDT": "NexPoint Diversified Real Estate Trust",
+    "PKST": "Peakstone Realty Trust",
+    # Timber
+    "RYN":  "Rayonier",
+    "WY":   "Weyerhaeuser",
 }
 
 RISK_COLORS = {"Critical": "#FF4B4B", "Moderate": "#FFA500", "Low/Stable": "#21C55D"}
@@ -532,16 +667,46 @@ df_all = load_data()
 
 # ─── Live News Scraper ─────────────────────────────────────────────────────────
 
-# Maps tickers to company names for better search results
+# Maps tickers to company names for better search results (one per sector to stay within RSS rate limits)
 _TICKER_SEARCH_TERMS = {
+    # Apartment
     "AVB":  "AvalonBay Communities REIT",
     "EQR":  "Equity Residential REIT",
     "ESS":  "Essex Property Trust REIT",
     "MAA":  "Mid-America Apartment REIT",
     "CPT":  "Camden Property Trust REIT",
     "UDR":  "UDR apartment REIT",
-    "INVH": "Invitation Homes REIT",
+    # Alt Housing
+    "INVH": "Invitation Homes single family rental REIT",
     "AMH":  "American Homes 4 Rent REIT",
+    "SUI":  "Sun Communities manufactured housing REIT",
+    # Industrial
+    "PLD":  "Prologis industrial REIT logistics",
+    "REXR": "Rexford Industrial Realty REIT",
+    # Healthcare
+    "WELL": "Welltower healthcare REIT",
+    "ARE":  "Alexandria Real Estate Equities life science REIT",
+    # Specialty
+    "AMT":  "American Tower cell tower REIT",
+    "IIPR": "Innovative Industrial Properties cannabis REIT",
+    # Data Centers
+    "EQIX": "Equinix data center REIT",
+    "DLR":  "Digital Realty data center REIT",
+    # Shopping Centers
+    "KIM":  "Kimco Realty shopping center REIT",
+    "REG":  "Regency Centers grocery anchored REIT",
+    # Mall
+    "SPG":  "Simon Property Group mall REIT",
+    # Self Storage
+    "PSA":  "Public Storage self storage REIT",
+    # Hotel
+    "HST":  "Host Hotels Resorts REIT",
+    # Office
+    "BXP":  "BXP Boston Properties office REIT",
+    "SLG":  "SL Green Realty office REIT",
+    # Diversified / Timber
+    "WY":   "Weyerhaeuser timber REIT",
+    # Keep Centerspace for Midwest coverage
     "CSR":  "Centerspace REIT",
 }
 
@@ -943,22 +1108,29 @@ def fetch_all_fred() -> dict[str, pd.DataFrame]:
 # ─── REIT Market Prices ───────────────────────────────────────────────────────
 
 @st.cache_data(ttl=300)
-def fetch_reit_prices(period: str = "1y") -> pd.DataFrame:
-    """Fetch REIT close prices from Yahoo Finance."""
+def fetch_reit_prices(tickers: tuple[str, ...] = (), period: str = "1y") -> pd.DataFrame:
+    """Fetch REIT close prices from Yahoo Finance for the given tickers only."""
+    if not tickers:
+        return pd.DataFrame()
     try:
-        data = yf.download(ALL_TICKERS, period=period, progress=False,
+        ticker_list = list(tickers)
+        data = yf.download(ticker_list, period=period, progress=False,
                            auto_adjust=True, actions=False)
-        close = data["Close"].dropna(how="all")
+        # yfinance returns flat columns for a single ticker, MultiIndex for multiple
+        if isinstance(data.columns, pd.MultiIndex):
+            close = data["Close"].dropna(how="all")
+        else:
+            close = data[["Close"]].rename(columns={"Close": ticker_list[0]}).dropna(how="all")
         return close
     except Exception:
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=300)
-def fetch_reit_info() -> dict[str, dict]:
-    """Fetch key market stats for each REIT ticker."""
+def fetch_reit_info(tickers: tuple[str, ...] = ()) -> dict[str, dict]:
+    """Fetch key market stats for each REIT ticker in the given tuple."""
     result = {}
-    for ticker in ALL_TICKERS:
+    for ticker in tickers:
         try:
             t = yf.Ticker(ticker)
             fi = t.fast_info
@@ -1272,9 +1444,11 @@ GOVERNOR_RACES_2026 = {
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def filter_by_tickers(df: pd.DataFrame, tickers: list) -> pd.DataFrame:
-    if not tickers or set(tickers) == set(ALL_TICKERS):
+    if not tickers:
         return df
     ticker_set = set(tickers)
+    if ticker_set >= set(ALL_TICKERS):
+        return df
     return df[df["tickers_exposed"].apply(
         lambda c: bool(ticker_set & set(str(c).split(",")))
     )]
@@ -1322,12 +1496,12 @@ def sentiment_color(score: float) -> str:
 
 # ─── AI assistant ─────────────────────────────────────────────────────────────
 
-def build_ai_context(df: pd.DataFrame) -> str:
+def build_ai_context(df: pd.DataFrame, tickers: list[str] | None = None) -> str:
+    active = tickers or list(REIT_SECTORS["Apartment"])
+    ticker_summary = ", ".join(f"{t} ({TICKER_NAMES.get(t, t)})" for t in active)
     lines = [
         "You are an expert REIT legislative risk analyst for an institutional investment fund.",
-        "Tracked tickers: AVB (AvalonBay), EQR (Equity Residential), ESS (Essex Property Trust), "
-        "MAA (Mid-America Apartment), CPT (Camden Property Trust), UDR, INVH (Invitation Homes), "
-        "AMH (American Homes 4 Rent), CSR (Centerspace — upper Midwest: MN, CO, MT, ND, SD, NE, UT).",
+        f"Currently tracked tickers: {ticker_summary}.",
         "CenterSquare Investment Management 13F (03/31/2026) holds: CPT $258M, UDR $282M, INVH $185M, "
         "AMH $166M, MAA $75M, EQR $68M, ESS $52M.",
         "",
@@ -1361,7 +1535,7 @@ def get_ai_response(question: str, df: pd.DataFrame) -> str:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=900,
-            system=build_ai_context(df),
+            system=build_ai_context(df, tickers=st.session_state.get("_sidebar_tickers")),
             messages=[
                 *[
                     {"role": m["role"], "content": m["content"]}
@@ -1449,11 +1623,45 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    selected_tickers = st.multiselect(
-        "REIT Tickers", ALL_TICKERS, default=ALL_TICKERS,
-        help="Filter all views by REIT ticker",
+    st.markdown(
+        "<div style='color:#7A9BBE;font-size:0.72rem;font-weight:700;"
+        "text-transform:uppercase;letter-spacing:0.06em;margin-bottom:4px;'>"
+        "SECTOR</div>",
+        unsafe_allow_html=True,
     )
-    st.session_state["_sidebar_tickers"] = selected_tickers or ALL_TICKERS
+    _all_sector_names = list(REIT_SECTORS.keys())
+    selected_sectors = st.multiselect(
+        "Sectors",
+        _all_sector_names,
+        default=["Apartment"],
+        help="Pick one or more sectors, then refine individual tickers below",
+        label_visibility="collapsed",
+    )
+    _sector_tickers: list[str] = []
+    for _s in (selected_sectors or _all_sector_names):
+        _sector_tickers.extend(REIT_SECTORS[_s])
+
+    st.markdown(
+        "<div style='color:#7A9BBE;font-size:0.72rem;font-weight:700;"
+        "text-transform:uppercase;letter-spacing:0.06em;margin-top:8px;margin-bottom:4px;'>"
+        "TICKERS</div>",
+        unsafe_allow_html=True,
+    )
+    selected_tickers = st.multiselect(
+        "REIT Tickers",
+        options=_sector_tickers,
+        default=_sector_tickers,
+        format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
+        help="Refine individual tickers within selected sector(s)",
+        label_visibility="collapsed",
+    )
+    if not selected_tickers:
+        selected_tickers = _sector_tickers
+    st.session_state["_sidebar_tickers"] = selected_tickers
+
+    if len(selected_tickers) > 50:
+        st.info(f"{len(selected_tickers)} tickers selected — price data may load slowly.")
+
     all_metros = sorted(df_all["metro_market"].unique().tolist())
     selected_metros = st.multiselect(
         "Metro Market", all_metros, default=all_metros,
@@ -1464,10 +1672,16 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    _n_sectors = len(selected_sectors) if selected_sectors else len(_all_sector_names)
+    _n_tickers = len(selected_tickers)
+    _n_markets = len(all_metros)
+    _n_states  = df_all["state_code"].nunique()
     st.markdown(
-        "<div style='color:#7A9BBE;font-size:0.72rem;'>"
-        "CenterSquare 13F · 03/31/2026<br>"
-        "9 tickers · 26 markets · 22 states</div>",
+        f"<div style='color:#7A9BBE;font-size:0.72rem;'>"
+        f"CenterSquare 13F · 03/31/2026<br>"
+        f"{_n_sectors} sector{'s' if _n_sectors != 1 else ''} · "
+        f"{_n_tickers} ticker{'s' if _n_tickers != 1 else ''} · "
+        f"{_n_markets} markets · {_n_states} states</div>",
         unsafe_allow_html=True,
     )
 
@@ -1482,15 +1696,19 @@ if risk_filter:
 
 # ─── Page header ─────────────────────────────────────────────────────────────
 
-st.markdown("""
+_header_sectors = " · ".join(selected_sectors) if selected_sectors else "All Sectors"
+st.markdown(
+    f"""
 <div class="page-header">
-  <h1>US Multifamily REIT &amp; Rent Control Intelligence Engine</h1>
+  <h1>US REIT &amp; Rent Control Intelligence Engine</h1>
   <p>Institutional Legislative Risk Platform &nbsp;·&nbsp;
-     AVB &nbsp;·&nbsp; EQR &nbsp;·&nbsp; ESS &nbsp;·&nbsp; MAA &nbsp;·&nbsp;
-     CPT &nbsp;·&nbsp; UDR &nbsp;·&nbsp; INVH &nbsp;·&nbsp; AMH &nbsp;·&nbsp; CSR
-     &nbsp;·&nbsp; Powered by CenterSquare 13F &amp; Primary Legislative Sources</p>
+     {_header_sectors}
+     &nbsp;·&nbsp; {len(selected_tickers)} tickers active
+     &nbsp;·&nbsp; Powered by Primary Legislative Sources</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 # ─── Metrics ribbon ───────────────────────────────────────────────────────────
 
@@ -1850,10 +2068,11 @@ with cio_tab:
             "REIT Price Performance</div>",
             unsafe_allow_html=True,
         )
-        reit_info = fetch_reit_info()
-        reit_prices = fetch_reit_prices()
+        _cio_tickers = tuple(st.session_state.get("_sidebar_tickers", list(REIT_SECTORS["Apartment"])))
+        reit_info = fetch_reit_info(_cio_tickers)
+        reit_prices = fetch_reit_prices(_cio_tickers)
 
-        for ticker in ALL_TICKERS:
+        for ticker in _cio_tickers:
             info = reit_info.get(ticker, {})
             if not info:
                 continue
@@ -2073,8 +2292,9 @@ with tab2:
 
         with ch1:
             # Count exposure per ticker
+            _active_tickers = st.session_state.get("_sidebar_tickers", list(REIT_SECTORS["Apartment"]))
             ticker_exposure = {}
-            for t in ALL_TICKERS:
+            for t in _active_tickers:
                 cnt = filtered_df["tickers_exposed"].apply(
                     lambda c: t in str(c).split(",")
                 ).sum()
@@ -2100,9 +2320,10 @@ with tab2:
 
         with ch2:
             # Critical NOI items per ticker
+            _active_tickers2 = st.session_state.get("_sidebar_tickers", list(REIT_SECTORS["Apartment"]))
             crit_df = filtered_df[filtered_df["portfolio_risk_impact"] == "Critical"]
             crit_exposure = {}
-            for t in ALL_TICKERS:
+            for t in _active_tickers2:
                 cnt = crit_df["tickers_exposed"].apply(
                     lambda c: t in str(c).split(",")
                 ).sum()
@@ -2265,8 +2486,9 @@ with tab3:
     with col_map:
         st.markdown("<div class='section-title'>Tickers at Risk</div>", unsafe_allow_html=True)
         if not all_ballot.empty:
+            _active_tickers3 = st.session_state.get("_sidebar_tickers", list(REIT_SECTORS["Apartment"]))
             bt_exposure = {}
-            for t in ALL_TICKERS:
+            for t in _active_tickers3:
                 active_rows = all_ballot[all_ballot["state_of_law"].isin(["Developing Ballot", "Pending Vote"])]
                 cnt = active_rows["tickers_exposed"].apply(
                     lambda c: t in str(c).split(",")
@@ -3238,9 +3460,10 @@ with tab7:
                 )
 
     # ── Single profile ─────────────────────────────────────────────────────────
+    _profile_tickers = st.session_state.get("_sidebar_tickers", ALL_TICKERS)
     if rp_mode == "Single Ticker Profile":
         selected = st.selectbox(
-            "Select Ticker", ALL_TICKERS,
+            "Select Ticker", _profile_tickers,
             format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
             key="rp_single",
         )
@@ -3251,15 +3474,15 @@ with tab7:
         cc1, cc2 = st.columns(2)
         with cc1:
             t1 = st.selectbox(
-                "Ticker A", ALL_TICKERS,
+                "Ticker A", _profile_tickers,
                 format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
                 key="rp_comp_a", index=0,
             )
         with cc2:
             t2 = st.selectbox(
-                "Ticker B", ALL_TICKERS,
+                "Ticker B", _profile_tickers,
                 format_func=lambda t: f"{t} — {TICKER_NAMES.get(t, t)}",
-                key="rp_comp_b", index=1,
+                key="rp_comp_b", index=min(1, len(_profile_tickers) - 1),
             )
 
         if t1 == t2:
