@@ -1573,7 +1573,8 @@ def fetch_live_news() -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows)
+    df_out = pd.DataFrame(rows)
+    return df_out.sort_values("published", ascending=False).reset_index(drop=True)
 
 
 # ─── Power & Grid News Scraper ────────────────────────────────────────────────
@@ -1719,6 +1720,7 @@ def fetch_grid_news() -> pd.DataFrame:
             published = entry.get("published", "")[:16]
             link = entry.get("link", "")
             summary_raw = entry.get("summary", "")
+            import re
             summary = re.sub(r"<[^>]+>", " ", summary_raw).strip()[:300]
             rows.append({
                 "headline": title,
@@ -1733,8 +1735,10 @@ def fetch_grid_news() -> pd.DataFrame:
         _fetch(_query, _state_tag)
 
     if not rows:
-        return pd.DataFrame(_GRID_NEWS_FALLBACK)
-    return pd.DataFrame(rows)
+        df_fallback = pd.DataFrame(_GRID_NEWS_FALLBACK)
+        return df_fallback.sort_values("published", ascending=False).reset_index(drop=True)
+    df_out = pd.DataFrame(rows)
+    return df_out.sort_values("published", ascending=False).reset_index(drop=True)
 
 
 # ─── Prediction Market Feeds ──────────────────────────────────────────────────
